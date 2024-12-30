@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "update-satoshi-data": "node src/scripts/updateSatoshiData.js"
+    "update-satoshi-data": "node src/scripts/updateSatoshiData.js",
+    "check-node": "node src/scripts/checkNodeStatus.js"
   },
   "dependencies": {
     "axios": "^1.7.9",

@@ -94,27 +94,43 @@ NEXT_PUBLIC_API_URL=http://localhost:3001
 
 ## 🚀 Running the Application
 
-1. Start Bitcoin Core with RPC enabled:
+1. Start Bitcoin Core with RPC and txindex enabled:
 
 ```bash
-bitcoind -server -rpcuser=your_username -rpcpassword=your_password
+bitcoind -server -rpcuser=your_username -rpcpassword=your_password -txindex=1
 ```
 
-2. Start the backend server:
+2. Check your Bitcoin node status:
+
+```bash
+cd backend
+npm run check-node
+```
+
+This will show:
+
+- Node connection status and version
+- Sync progress and estimated time remaining
+- Mempool status and size
+- Transaction indexing status
+
+Make sure your node is fully synced and has txindex enabled before proceeding.
+
+3. Start the backend server:
 
 ```bash
 cd backend
 npm run dev
 ```
 
-3. Start the frontend development server:
+4. Start the frontend development server:
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-4. Initialize the Satoshi transaction database:
+5. Initialize the Satoshi transaction database:
 
 ```bash
 cd backend
@@ -130,10 +146,29 @@ The application will be available at:
 
 The application maintains a database of transactions connected to Satoshi's addresses. To update this data:
 
-```bash
-cd backend
-npm run update-satoshi-data
-```
+### Available Scripts
+
+#### `npm run check-node`
+
+Checks the status of your Bitcoin Core node, including:
+
+- Connection status and peer count
+- Blockchain sync progress
+- Estimated time remaining for sync
+- Mempool status and size
+- Transaction index (txindex) status
+
+Use this script to verify your node is properly configured and ready for use.
+
+#### `npm run update-satoshi-data`
+
+Updates the local database with the latest Satoshi-related transactions:
+
+- Scans known Satoshi addresses for new transactions
+- Updates the connection graph
+- Maintains the transaction history database
+
+Run this script periodically to keep the database current with new transactions.
 
 This process can take several hours on the first run as it needs to scan the entire blockchain for relevant transactions.
 
