@@ -9,10 +9,17 @@ const {
 const path = require("path");
 const { SATOSHI_ADDRESSES } = require("../services/bitcoinService");
 const bitcoinRPC = require("../services/bitcoinRPC");
+const fs = require("fs");
 
 const DB_PATH = process.env.DB_PATH || "./data/satoshi-transactions";
 const MAX_DEGREE = parseInt(process.env.MAX_DEGREE) || 100;
 const BATCH_SIZE = parseInt(process.env.BATCH_SIZE) || 100;
+
+// Add this at the beginning of your updateSatoshiTransactions function
+const dataDir = path.join(__dirname, "../../data");
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
 
 // Worker thread for processing addresses
 if (!isMainThread) {
@@ -144,14 +151,28 @@ async function processBatch(addresses, currentDegree) {
 }
 
 async function updateSatoshiTransactions() {
-  console.log("Starting Satoshi transactions update...");
-  console.log(
-    `Processing ${SATOSHI_ADDRESSES.length} known Satoshi addresses...`
-  );
-
-  const db = new Level(DB_PATH, { valueEncoding: "json" });
-
   try {
+    console.log("Starting Satoshi transactions update...");
+
+    // Test Bitcoin node connection first
+    try {
+      await bitcoinRPC.testConnection();
+    } catch (error) {
+      console.error("Bitcoin node connection test failed:", error.message);
+      process.exit(1);
+    }
+
+    // Initialize the database
+    try {
+      await bitcoinRPC.initDB();
+      console.log("Database initialized successfully");
+    } catch (error) {
+      console.error("Database initialization failed:", error.message);
+      process.exit(1);
+    }
+
+    const db = new Level(DB_PATH, { valueEncoding: "json" });
+
     // First degree: Direct transactions from Satoshi
     const firstDegreeBatches = [];
     for (let i = 0; i < SATOSHI_ADDRESSES.length; i += BATCH_SIZE) {
@@ -261,11 +282,24 @@ async function updateSatoshiTransactions() {
     console.log("Successfully updated Satoshi transactions database");
   } catch (error) {
     console.error("Error updating Satoshi transactions:", error);
-    process.exit(1);
+    throw error;
+  } finally {
+    // Make sure to close the database when done
+    await bitcoinRPC.closeDB();
   }
 }
 
-// Only run if this is the main thread
-if (isMainThread) {
-  updateSatoshiTransactions();
+// If this script is run directly
+if (require.main === module) {
+  updateSatoshiTransactions()
+    .then(() => {
+      console.log("Update completed successfully");
+      process.exit(0);
+    })
+    .catch((error) => {
+      console.error("Update failed:", error);
+      process.exit(1);
+    });
 }
+
+module.exports = { updateSatoshiTransactions };

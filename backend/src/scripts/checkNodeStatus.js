@@ -77,43 +77,45 @@ async function checkNodeStatus() {
   }
 
   try {
-    // Test if txindex is available
-    console.log("\nChecking transaction index...");
-    console.log("Attempting to query a historical transaction...");
+    // Test if we can query transactions
+    console.log("\nChecking transaction querying capability...");
 
-    // Using the first-ever Bitcoin transaction (Satoshi to Hal Finney)
-    await bitcoinRPC.getTransaction(
-      "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
-    );
-    console.log("✓ Transaction index (txindex) is enabled and working");
-  } catch (error) {
-    console.log("❌ Transaction index check failed");
+    // Try both getrawtransaction and gettransaction
+    let txQueryMethod = "none";
 
-    if (error.response?.data?.error?.message?.includes("No such mempool")) {
-      console.log("\nStatus: Transaction found but not indexed");
-      console.log("This usually means:");
-      console.log("- txindex=1 is configured");
-      console.log("- Index is still being built");
-    } else if (error.response?.data?.error?.code === -1) {
-      console.log("\nAction needed:");
+    try {
+      await bitcoinRPC.call("getrawtransaction", [
+        "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16",
+        true,
+      ]);
+      txQueryMethod = "txindex";
+    } catch (error) {
+      try {
+        await bitcoinRPC.call("gettransaction", [
+          "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16",
+        ]);
+        txQueryMethod = "wallet";
+      } catch (walletError) {
+        txQueryMethod = "none";
+      }
+    }
+
+    if (txQueryMethod === "txindex") {
+      console.log("✓ Full transaction index (txindex) is enabled and working");
+    } else if (txQueryMethod === "wallet") {
+      console.log("✓ Wallet transaction lookup is working");
+      console.log("\nNote: Only wallet transactions will be queryable.");
+      console.log("To query any transaction, add txindex=1 to bitcoin.conf");
+    } else {
+      console.log("❌ Transaction querying is limited");
+      console.log("\nTo enable full transaction querying:");
       console.log("1. Add txindex=1 to bitcoin.conf");
       console.log("2. Restart Bitcoin Core");
       console.log("3. Wait for the index to be built (can take several hours)");
-      console.log("\nTypical location of bitcoin.conf:");
-      console.log("- Linux: ~/.bitcoin/bitcoin.conf");
-      console.log("- Windows: %APPDATA%\\Bitcoin\\bitcoin.conf");
-      console.log(
-        "- macOS: ~/Library/Application Support/Bitcoin/bitcoin.conf"
-      );
-    } else {
-      console.log("\nUnexpected error:", error.message);
-      if (error.response?.data) {
-        console.log(
-          "RPC Response:",
-          JSON.stringify(error.response.data, null, 2)
-        );
-      }
     }
+  } catch (error) {
+    console.log("❌ Transaction query check failed");
+    console.error("\nError:", error.message);
   }
 }
 
