@@ -18,6 +18,8 @@ const FETCH_TIMEOUT = 300000; // 5 minutes
 const BLOCK_FETCH_TIMEOUT = 600000; // 10 minutes for initial block fetch
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY = 30000; // 30 seconds
+const PROGRESS_TABLE_LINES = 7; // Number of lines in our progress table
+const STATUS_UPDATE_LINES = 7; // Number of lines in the status update box
 
 // Ensure the database directory exists
 const dataDir = path.join(
@@ -43,27 +45,52 @@ function delay(ms) {
 }
 
 // Modify the timeoutPromise function
-async function timeoutPromise(promiseFn, ms = FETCH_TIMEOUT, retries = 3) {
+async function timeoutPromise(
+  promiseFn,
+  ms = FETCH_TIMEOUT,
+  retries = RETRY_ATTEMPTS
+) {
   let lastError;
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const timeoutError = new Error(`Timeout of ${ms}ms exceeded`);
+      const timeoutController = new AbortController();
+      const timeoutId = setTimeout(() => timeoutController.abort(), ms);
+
       const result = await Promise.race([
         promiseFn(),
-        new Promise((_, reject) => setTimeout(() => reject(timeoutError), ms)),
+        new Promise((_, reject) => {
+          timeoutController.signal.addEventListener("abort", () => {
+            reject(new Error(`Operation timed out after ${ms}ms`));
+          });
+        }),
       ]);
+
+      clearTimeout(timeoutId);
       return result;
     } catch (error) {
       lastError = error;
-      console.log(`Attempt ${attempt}/${retries} failed:`, error.message);
+      const isTimeout = error.message.includes("timed out");
+
+      console.log(
+        `Attempt ${attempt}/${retries} failed: ${error.message}\n` +
+          `Error type: ${isTimeout ? "Timeout" : "Other"}`
+      );
 
       if (attempt === retries) {
-        throw lastError;
+        throw new Error(
+          `All ${retries} attempts failed. Last error: ${lastError.message}`
+        );
       }
 
-      const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
-      console.log(`Waiting ${delay / 1000} seconds before retry...`);
+      // Exponential backoff with jitter
+      const baseDelay = RETRY_DELAY * Math.pow(2, attempt - 1);
+      const jitter = Math.random() * 1000; // Add up to 1 second of random jitter
+      const delay = Math.min(baseDelay + jitter, 120000); // Cap at 2 minutes
+
+      console.log(
+        `Waiting ${Math.round(delay / 1000)} seconds before retry...`
+      );
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
@@ -171,9 +198,25 @@ async function spawnWorker(address, currentDegree) {
       workerData: { address, currentDegree },
     });
 
-    worker.on("message", resolve);
-    worker.on("error", reject);
+    // Add timeout to kill hanging workers
+    const workerTimeout = setTimeout(() => {
+      console.error(`Worker for address ${address} timed out, terminating...`);
+      worker.terminate();
+      reject(new Error(`Worker timed out processing address ${address}`));
+    }, FETCH_TIMEOUT);
+
+    worker.on("message", (result) => {
+      clearTimeout(workerTimeout);
+      resolve(result);
+    });
+
+    worker.on("error", (error) => {
+      clearTimeout(workerTimeout);
+      reject(error);
+    });
+
     worker.on("exit", (code) => {
+      clearTimeout(workerTimeout);
       if (code !== 0) {
         reject(new Error(`Worker stopped with exit code ${code}`));
       }
@@ -182,10 +225,88 @@ async function spawnWorker(address, currentDegree) {
 }
 
 async function processBatch(addresses, currentDegree) {
-  const results = await Promise.all(
-    addresses.map((address) => spawnWorker(address, currentDegree))
-  );
-  return results.filter((r) => r.success).map((r) => r.result);
+  const results = [];
+  const failedAddresses = [];
+
+  for (const address of addresses) {
+    try {
+      const result = await timeoutPromise(
+        () => spawnWorker(address, currentDegree),
+        FETCH_TIMEOUT,
+        RETRY_ATTEMPTS
+      );
+
+      if (result.success) {
+        results.push(result.result);
+      } else {
+        console.error(`Failed to process address ${address}: ${result.error}`);
+        failedAddresses.push(address);
+      }
+    } catch (error) {
+      console.error(`Failed to process address ${address}: ${error.message}`);
+      failedAddresses.push(address);
+    }
+  }
+
+  // If there are failed addresses, retry them once more with increased timeout
+  if (failedAddresses.length > 0) {
+    console.log(
+      `Retrying ${failedAddresses.length} failed addresses with increased timeout...`
+    );
+
+    for (const address of failedAddresses) {
+      try {
+        const result = await timeoutPromise(
+          () => spawnWorker(address, currentDegree),
+          FETCH_TIMEOUT * 2, // Double the timeout for retries
+          2 // Fewer retry attempts for already-failed addresses
+        );
+
+        if (result.success) {
+          results.push(result.result);
+        }
+      } catch (error) {
+        console.error(
+          `Permanently failed to process address ${address}: ${error.message}`
+        );
+      }
+    }
+  }
+
+  return results;
+}
+
+// Add these helper functions at the top level
+function clearLines(count) {
+  process.stdout.write(`\x1b[${count}A\x1b[0J`);
+}
+
+function updateProgress(
+  currentBlock,
+  totalBlocks,
+  overallProgress,
+  batchProgress
+) {
+  // Clear both progress displays (if they exist)
+  clearLines(PROGRESS_TABLE_LINES + STATUS_UPDATE_LINES);
+
+  const progressTable = [
+    "┌────────────────────────────────────────────────────┐",
+    "│ Progress Update                                    │",
+    "├────────────────────────────────────────────────────┤",
+    `│ Current Block:     ${currentBlock
+      .toLocaleString()
+      .padEnd(10)} of ${totalBlocks.toLocaleString().padEnd(10)} │`,
+    `│ Overall Progress:  ${overallProgress
+      .toFixed(2)
+      .padStart(7)}%                        │`,
+    `│ Batch Progress:    ${batchProgress
+      .toFixed(2)
+      .padStart(7)}%                        │`,
+    "└────────────────────────────────────────────────────┘",
+  ].join("\n");
+
+  console.log(progressTable);
 }
 
 async function updateSatoshiTransactions() {
@@ -209,25 +330,31 @@ async function updateSatoshiTransactions() {
       try {
         const transactionsByAddress = await timeoutPromise(
           () => bitcoinRPC.getAddressTransactions(batch),
-          BLOCK_FETCH_TIMEOUT, // Use longer timeout for block fetching
-          5 // More retries for initial scan
+          BLOCK_FETCH_TIMEOUT,
+          5
         );
 
-        // Process transactions for each address
         for (const [address, transactions] of Object.entries(
           transactionsByAddress
         )) {
           if (!transactions || transactions.length === 0) {
-            console.log(
-              `No transactions found for address ${address}, skipping...`
-            );
             continue;
           }
 
-          console.log(
-            `Processing ${transactions.length} transactions for ${address}`
+          // Update progress display
+          const currentBlock = transactions[0].block_height || 0;
+          const totalBlocks = await bitcoinRPC.getBlockCount();
+          const overallProgress = (currentBlock / totalBlocks) * 100;
+          const batchProgress = (i / SATOSHI_ADDRESSES.length) * 100;
+
+          updateProgress(
+            currentBlock,
+            totalBlocks,
+            overallProgress,
+            batchProgress
           );
 
+          // Process transactions for each address
           for (const tx of transactions) {
             const isOutgoing = tx.inputs.some(
               (input) => input.prev_out.addr === address
@@ -276,11 +403,9 @@ async function updateSatoshiTransactions() {
           }
         }
       } catch (error) {
-        console.error("Failed to process batch:", error.message);
-        // Add recovery logic
+        console.error("\nFailed to process batch:", error.message);
         if (error.message.includes("timeout")) {
           console.log("Attempting to resume from last saved progress...");
-          // The BitcoinRPC class will handle resuming from the last saved block
           continue;
         }
         throw error;
@@ -337,15 +462,15 @@ async function updateSatoshiTransactions() {
 
     console.log("Successfully updated Satoshi transactions database");
   } catch (error) {
-    console.error("Error updating Satoshi transactions:", error);
+    console.error("\nError updating Satoshi transactions:", error);
     throw error;
   } finally {
     if (db) {
       try {
         await db.close();
-        console.log("Database connection closed");
+        console.log("\nDatabase connection closed");
       } catch (error) {
-        console.error("Error closing database:", error);
+        console.error("\nError closing database:", error);
       }
     }
   }

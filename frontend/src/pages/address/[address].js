@@ -319,7 +319,7 @@ export default function AddressPage({ address, initialLoad }) {
                         >
                           {data.isConnected
                             ? "Connected to Satoshi"
-                            : "No connection found"}
+                            : "No connection to Satoshi found"}
                         </Typography>
                       </Typography>
                       {data.isConnected && (

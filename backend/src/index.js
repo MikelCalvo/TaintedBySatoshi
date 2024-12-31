@@ -11,11 +11,11 @@ const PORT = process.env.PORT || 3001;
 app.use(
   cors({
     origin: (origin, callback) => {
-      const allowedOrigins = [
-        "http://localhost:3000",
-        "http://localhost:1337",
-        process.env.FRONTEND_URL,
-      ].filter(Boolean); // Remove any undefined values
+      const allowedOrigins = [process.env.FRONTEND_URL].filter(Boolean);
+
+      if (process.env.NODE_ENV === "development") {
+        allowedOrigins.push("http://localhost:1337");
+      }
 
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
@@ -23,9 +23,9 @@ app.use(
         callback(new Error("Not allowed by CORS"));
       }
     },
-    methods: ["GET", "POST"],
+    methods: ["GET", "POST", "OPTIONS"],
     credentials: true,
-    maxAge: 86400, // 24 hours
+    maxAge: 86400,
   })
 );
 app.use(express.json());
@@ -38,7 +38,22 @@ if (!fs.existsSync(dataDir)) {
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
-  res.json({ status: "healthy" });
+  try {
+    res.json({
+      status: "healthy",
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+    });
+  } catch (error) {
+    console.error("Health check failed:", error);
+    res.status(500).json({
+      status: "unhealthy",
+      error:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : "Internal server error",
+    });
+  }
 });
 
 // Add error handling middleware
