@@ -14,52 +14,21 @@ import {
   Paper,
   Divider,
   Stack,
+  CircularProgress,
 } from "@mui/material";
 import { ArrowBack, ArrowForward } from "@mui/icons-material";
 import AddressSearchForm from "../../components/AddressSearchForm";
+import { useState, useEffect } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
 export async function getServerSideProps({ params }) {
-  try {
-    const response = await fetch(`${API_URL}/api/check/${params.address}`);
-    const data = await response.json();
-
-    if (!response.ok) {
-      return {
-        props: {
-          address: params.address,
-          error: {
-            title:
-              response.status === 429
-                ? "Rate Limit Exceeded"
-                : "Error Checking Address",
-            description:
-              response.status === 429
-                ? "We are currently gathering data from the Bitcoin network. Please try again in 24 hours."
-                : data.error || "Failed to check address",
-          },
-        },
-      };
-    }
-
-    return {
-      props: {
-        address: params.address,
-        result: data,
-      },
-    };
-  } catch (error) {
-    return {
-      props: {
-        address: params.address,
-        error: {
-          title: "Error",
-          description: "Failed to check address connection",
-        },
-      },
-    };
-  }
+  return {
+    props: {
+      address: params.address,
+      initialLoad: true,
+    },
+  };
 }
 
 const formatBTC = (satoshis) => {
@@ -168,8 +137,110 @@ const ConnectionPath = ({ path }) => (
   </List>
 );
 
-export default function AddressPage({ address, result, error }) {
+export default function AddressPage({ address, initialLoad }) {
+  const [isLoading, setIsLoading] = useState(initialLoad);
+  const [error, setError] = useState(null);
+  const [data, setData] = useState(null);
   const router = useRouter();
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const API_URL =
+          process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+
+        const retryWithBackoff = async (fn, retries = 2) => {
+          for (let i = 0; i < retries; i++) {
+            try {
+              return await fn();
+            } catch (error) {
+              if (i === retries - 1) throw error;
+              await new Promise((resolve) =>
+                setTimeout(resolve, (i + 1) * 1000)
+              );
+            }
+          }
+        };
+
+        const result = await retryWithBackoff(async () => {
+          const response = await fetch(`${API_URL}/api/check/${address}`, {
+            headers: {
+              Accept: "application/json",
+              "Cache-Control": "no-cache",
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error(response.statusText);
+          }
+
+          return response.json();
+        });
+
+        setData(result);
+        setError(null);
+      } catch (err) {
+        setError({
+          title: "Error",
+          description: err.message || "Failed to check address connection",
+        });
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    if (initialLoad) {
+      fetchData();
+    }
+  }, [address, initialLoad]);
+
+  if (isLoading) {
+    return (
+      <Container maxWidth="md" sx={{ py: 10 }}>
+        <Box>
+          <Link href="/" passHref>
+            <Button startIcon={<ArrowBack />} sx={{ mb: 2 }}>
+              Back
+            </Button>
+          </Link>
+          <Typography variant="h4" gutterBottom>
+            Address Details
+          </Typography>
+          <Typography variant="body1" sx={{ fontFamily: "monospace", mb: 4 }}>
+            {address}
+          </Typography>
+        </Box>
+        <Paper sx={{ p: 4, textAlign: "center" }}>
+          <CircularProgress size={40} sx={{ mb: 2 }} />
+          <Typography>
+            Checking address connection to Satoshi's wallets...
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            This may take a few moments
+          </Typography>
+        </Paper>
+      </Container>
+    );
+  }
+
+  if (error) {
+    return (
+      <Container maxWidth="md" sx={{ py: 10 }}>
+        <Alert severity="error" sx={{ mb: 4 }}>
+          <AlertTitle>{error.title}</AlertTitle>
+          {error.description}
+        </Alert>
+        <Button
+          component={Link}
+          href="/"
+          startIcon={<ArrowBack />}
+          sx={{ mt: 2 }}
+        >
+          Back to Search
+        </Button>
+      </Container>
+    );
+  }
 
   return (
     <>
@@ -211,10 +282,10 @@ export default function AddressPage({ address, result, error }) {
             </Alert>
           )}
 
-          {result && (
+          {data && (
             <Paper sx={{ p: 4 }}>
               <Stack spacing={4}>
-                {result.isSatoshiAddress ? (
+                {data.isSatoshiAddress ? (
                   <>
                     <Box>
                       <Chip
@@ -225,8 +296,15 @@ export default function AddressPage({ address, result, error }) {
                     </Box>
                     <Typography>
                       This is one of Satoshi Nakamoto's known addresses.{" "}
-                      {result.note}
+                      {data.note}
                     </Typography>
+                    <Divider />
+                    <Box>
+                      <Typography variant="body1" align="center" sx={{ mb: 4 }}>
+                        Try searching for a different address:
+                      </Typography>
+                      <AddressSearchForm />
+                    </Box>
                   </>
                 ) : (
                   <>
@@ -236,29 +314,40 @@ export default function AddressPage({ address, result, error }) {
                         <Typography
                           component="span"
                           color={
-                            result.isConnected ? "success.main" : "error.main"
+                            data.isConnected ? "success.main" : "error.main"
                           }
                         >
-                          {result.isConnected
+                          {data.isConnected
                             ? "Connected to Satoshi"
                             : "No connection found"}
                         </Typography>
                       </Typography>
-                      {result.isConnected && (
+                      {data.isConnected && (
                         <Typography color="text.secondary">
-                          {getDegreeDescription(result.degree)}
+                          {getDegreeDescription(data.degree)}
                         </Typography>
                       )}
                     </Box>
 
-                    {result.isConnected ? (
+                    {data.isConnected ? (
                       <>
                         <Divider />
                         <Box>
                           <Typography variant="h6" gutterBottom>
                             Transaction Path:
                           </Typography>
-                          <ConnectionPath path={result.connectionPath} />
+                          <ConnectionPath path={data.connectionPath} />
+                        </Box>
+                        <Divider />
+                        <Box>
+                          <Typography
+                            variant="body1"
+                            align="center"
+                            sx={{ mb: 4 }}
+                          >
+                            Try searching for a different address:
+                          </Typography>
+                          <AddressSearchForm />
                         </Box>
                       </>
                     ) : (

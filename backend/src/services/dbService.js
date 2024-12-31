@@ -49,7 +49,15 @@ class DatabaseService {
   }
 
   async getTaintedInfo(address) {
-    return await this.db.get(`tainted:${address}`);
+    try {
+      const data = await this.db.get(`tainted:${address}`);
+      return data;
+    } catch (err) {
+      if (err.code === "LEVEL_NOT_FOUND") {
+        return null;
+      }
+      throw err;
+    }
   }
 
   async updateTaintedInfo(address, taintedInfo) {
@@ -57,7 +65,15 @@ class DatabaseService {
   }
 
   async getTransaction(txHash) {
-    return await this.db.get(`tx:${txHash}`);
+    try {
+      const data = await this.db.get(`tx:${txHash}`);
+      return data;
+    } catch (err) {
+      if (err.code === "LEVEL_NOT_FOUND") {
+        return null;
+      }
+      throw err;
+    }
   }
 
   async saveTransaction(txHash, txData) {
@@ -73,6 +89,18 @@ class DatabaseService {
       gt: `queue:${degree}:`,
       lt: `queue:${degree}:\xff`,
     });
+  }
+
+  async getDatabaseStatus() {
+    try {
+      const status = await this.db.get("db:status");
+      return status;
+    } catch (err) {
+      return {
+        lastUpdate: null,
+        isUpdating: false,
+      };
+    }
   }
 }
 
