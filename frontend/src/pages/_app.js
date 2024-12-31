@@ -1,35 +1,39 @@
-import { ThemeProvider, createTheme } from '@mui/material/styles';
-import { Box } from '@mui/material';
-import CssBaseline from '@mui/material/CssBaseline';
-import { Footer } from '../components/Footer';
+import { ThemeProvider } from "@mui/material/styles";
+import CssBaseline from "@mui/material/CssBaseline";
+import { CacheProvider } from "@emotion/react";
+import createEmotionCache from "../lib/createEmotionCache";
+import theme from "../styles/theme";
+import { StyledEngineProvider } from "@mui/material/styles";
+import Box from "@mui/material/Box";
+import { Footer } from "../components/Footer";
 
-const theme = createTheme({
-  palette: {
-    primary: {
-      main: '#9333ea', // Purple color
-    },
-    background: {
-      default: '#f8fafc',
-    },
-  },
-});
+// Client-side cache, shared for the whole session of the user in the browser.
+const clientSideEmotionCache = createEmotionCache();
 
-export default function App({ Component, pageProps }) {
+export default function MyApp(props) {
+  const { Component, emotionCache = clientSideEmotionCache, pageProps } = props;
+
   return (
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <Box
-        sx={{
-          display: 'flex',
-          flexDirection: 'column',
-          minHeight: '100vh',
-        }}
-      >
-        <Box sx={{ flex: '1 0 auto' }}>
-          <Component {...pageProps} />
-        </Box>
-        <Footer />
-      </Box>
-    </ThemeProvider>
+    <CacheProvider value={emotionCache}>
+      <StyledEngineProvider injectFirst>
+        <ThemeProvider theme={theme}>
+          <CssBaseline />
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              minHeight: "100vh",
+            }}
+          >
+            <Box sx={{ flex: "1 0 auto" }}>
+              <Component {...pageProps} />
+            </Box>
+            <Footer />
+          </Box>
+        </ThemeProvider>
+      </StyledEngineProvider>
+    </CacheProvider>
   );
-} 
+}
+
+// Remove getInitialProps if it exists

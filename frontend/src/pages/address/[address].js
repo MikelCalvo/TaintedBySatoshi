@@ -14,9 +14,9 @@ import {
   Paper,
   Divider,
   Stack,
-  IconButton,
 } from "@mui/material";
 import { ArrowBack, ArrowForward } from "@mui/icons-material";
+import AddressSearchForm from "../../components/AddressSearchForm";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
@@ -186,7 +186,7 @@ export default function AddressPage({ address, result, error }) {
           <Box>
             <Link href="/" passHref>
               <Button startIcon={<ArrowBack />} sx={{ mb: 2 }}>
-                Back to Search
+                Back
               </Button>
             </Link>
             <Typography variant="h4" gutterBottom>
@@ -251,7 +251,7 @@ export default function AddressPage({ address, result, error }) {
                       )}
                     </Box>
 
-                    {result.isConnected && (
+                    {result.isConnected ? (
                       <>
                         <Divider />
                         <Box>
@@ -259,6 +259,20 @@ export default function AddressPage({ address, result, error }) {
                             Transaction Path:
                           </Typography>
                           <ConnectionPath path={result.connectionPath} />
+                        </Box>
+                      </>
+                    ) : (
+                      <>
+                        <Divider />
+                        <Box>
+                          <Typography
+                            variant="body1"
+                            align="center"
+                            sx={{ mb: 4 }}
+                          >
+                            Try searching for a different address:
+                          </Typography>
+                          <AddressSearchForm />
                         </Box>
                       </>
                     )}
