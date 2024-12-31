@@ -156,29 +156,67 @@ The application maintains a database of transactions connected to Satoshi's addr
 
 ### Available Scripts
 
-#### `npm run check-node`
+#### Backend Scripts
 
-Checks the status of your Bitcoin Core node, including:
+| Script                        | Description                              | Command                                                                       |
+| ----------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------- |
+| `npm start`                   | Start the production server              | `node src/index.js`                                                           |
+| `npm run dev`                 | Start development server with hot reload | `nodemon src/index.js`                                                        |
+| `npm run update-satoshi-data` | Update Satoshi transaction database      | `node --expose-gc --max-old-space-size=8192 src/scripts/updateSatoshiData.js` |
+| `npm run check-node`          | Check Bitcoin node status                | `node src/scripts/checkNodeStatus.js`                                         |
 
-- Connection status and peer count
-- Blockchain sync progress
-- Estimated time remaining for sync
-- Mempool status and size
-- Transaction index (txindex) status
+The `update-satoshi-data` script includes:
 
-Use this script to verify your node is properly configured and ready for use.
+- Automatic garbage collection with `--expose-gc`
+- 8GB heap allocation with `--max-old-space-size=8192`
+- Transaction batch processing
+- Progress monitoring with visual feedback
+- Automatic retry mechanism
+- Memory usage optimization
 
-#### `npm run update-satoshi-data`
+#### Frontend Scripts
 
-Updates the local database with the latest Satoshi-related transactions:
+| Script          | Description              | Command      |
+| --------------- | ------------------------ | ------------ |
+| `npm run dev`   | Start development server | `next dev`   |
+| `npm run build` | Build for production     | `next build` |
+| `npm run start` | Start production server  | `next start` |
+| `npm run lint`  | Run ESLint               | `next lint`  |
 
-- Scans known Satoshi addresses for new transactions
-- Updates the connection graph
-- Maintains the transaction history database
+### Running the Application
 
-Run this script periodically to keep the database current with new transactions.
+1. Start the backend development server:
 
-This process can take several hours on the first run as it needs to scan the entire blockchain for relevant transactions.
+```bash
+cd backend
+npm run dev
+```
+
+2. Start the frontend development server:
+
+```bash
+cd frontend
+npm run dev
+```
+
+3. Initialize or update the Satoshi transaction database:
+
+```bash
+cd backend
+npm run update-satoshi-data
+```
+
+4. To check your Bitcoin node status:
+
+```bash
+cd backend
+npm run check-node
+```
+
+The application will be available at:
+
+- Frontend: http://localhost:1337 (default)
+- Backend API: http://localhost:3001 (default)
 
 ## 📝 API Endpoints
 
@@ -279,21 +317,29 @@ Recommended hardware for optimal performance:
 
 ## Environment Variables
 
-Updated environment variables table:
+### Backend Variables
 
 | Variable                   | Description                                   | Default     |
 | -------------------------- | --------------------------------------------- | ----------- |
-| `DB_PATH`                  | Path to store the database files              | `./data`    |
-| `MAX_DEGREE`               | Maximum number of transaction hops to track   | `100`       |
-| `BATCH_SIZE`               | Number of transactions to process in parallel | `250`       |
+| `PORT`                     | Server port                                   | `3001`      |
+| `FRONTEND_URL`             | Frontend URL for CORS                         | -           |
+| `NODE_ENV`                 | Environment (development/production)          | -           |
 | `BITCOIN_RPC_HOST`         | Bitcoin node hostname                         | `localhost` |
 | `BITCOIN_RPC_PORT`         | Bitcoin node RPC port                         | `8332`      |
 | `BITCOIN_RPC_USER`         | Bitcoin node RPC username                     | -           |
 | `BITCOIN_RPC_PASS`         | Bitcoin node RPC password                     | -           |
-| `BITCOIN_RPC_TIMEOUT`      | RPC request timeout in milliseconds           | `300000`    |
-| `BITCOIN_BATCH_SIZE`       | Number of blocks per batch                    | `250`       |
-| `BITCOIN_MAX_PARALLEL`     | Maximum parallel RPC requests                 | `32`        |
-| `BITCOIN_CACHE_SIZE`       | Transaction cache size                        | `50000`     |
-| `BITCOIN_RETRY_DELAY`      | Retry delay in milliseconds                   | `500`       |
+| `BITCOIN_RPC_TIMEOUT`      | RPC request timeout in milliseconds           | `60000`     |
+| `DB_PATH`                  | Path to store the database files              | `./data`    |
+| `MAX_DEGREE`               | Maximum number of transaction hops to track   | `100`       |
+| `BATCH_SIZE`               | Number of transactions to process in parallel | `250`       |
 | `BITCOIN_MAX_RETRIES`      | Maximum retry attempts                        | `5`         |
 | `BITCOIN_MEMORY_THRESHOLD` | Memory usage threshold for GC                 | `0.90`      |
+| `BITCOIN_BLOCK_TIMEOUT`    | Block processing timeout in milliseconds      | `300000`    |
+
+### Frontend Variables
+
+| Variable                       | Description              | Default                 |
+| ------------------------------ | ------------------------ | ----------------------- |
+| `NEXT_PUBLIC_API_URL`          | Backend API URL          | `http://localhost:3001` |
+| `NEXT_PUBLIC_DONATION_ADDRESS` | Bitcoin donation address | -                       |
+| `NEXT_PUBLIC_REPOSITORY_URL`   | GitHub repository URL    | -                       |
