@@ -11,12 +11,18 @@ const { SATOSHI_ADDRESSES } = require("../services/bitcoinService");
 const bitcoinRPC = require("../services/bitcoinRPC");
 const fs = require("fs");
 
-const DB_PATH = process.env.DB_PATH || "./data/satoshi-transactions";
+const DB_PATH = process.env.DB_PATH || "./data";
 const MAX_DEGREE = parseInt(process.env.MAX_DEGREE) || 100;
 const BATCH_SIZE = parseInt(process.env.BATCH_SIZE) || 100;
+const FETCH_TIMEOUT = 300000; // 5 minutes
+const BLOCK_FETCH_TIMEOUT = 600000; // 10 minutes for initial block fetch
+const RETRY_ATTEMPTS = 3;
+const RETRY_DELAY = 30000; // 30 seconds
 
-// Add this at the beginning of your updateSatoshiTransactions function
-const dataDir = path.join(__dirname, "../../data");
+// Ensure the database directory exists
+const dataDir = path.join(
+  process.env.DB_PATH || path.join(__dirname, "../../data")
+);
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
@@ -29,6 +35,38 @@ if (!isMainThread) {
     .catch((error) =>
       parentPort.postMessage({ success: false, error: error.message })
     );
+}
+
+// Create a timeout wrapper function
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Modify the timeoutPromise function
+async function timeoutPromise(promiseFn, ms = FETCH_TIMEOUT, retries = 3) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const timeoutError = new Error(`Timeout of ${ms}ms exceeded`);
+      const result = await Promise.race([
+        promiseFn(),
+        new Promise((_, reject) => setTimeout(() => reject(timeoutError), ms)),
+      ]);
+      return result;
+    } catch (error) {
+      lastError = error;
+      console.log(`Attempt ${attempt}/${retries} failed:`, error.message);
+
+      if (attempt === retries) {
+        throw lastError;
+      }
+
+      const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
+      console.log(`Waiting ${delay / 1000} seconds before retry...`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
 }
 
 async function processAddress(address, currentDegree, db) {
@@ -151,83 +189,101 @@ async function processBatch(addresses, currentDegree) {
 }
 
 async function updateSatoshiTransactions() {
+  let db;
+
   try {
     console.log("Starting Satoshi transactions update...");
 
-    // Test Bitcoin node connection first
-    try {
-      await bitcoinRPC.testConnection();
-    } catch (error) {
-      console.error("Bitcoin node connection test failed:", error.message);
-      process.exit(1);
-    }
+    // Initialize Bitcoin RPC once
+    await bitcoinRPC.initialize();
 
-    // Initialize the database
-    try {
-      await bitcoinRPC.initDB();
-      console.log("Database initialized successfully");
-    } catch (error) {
-      console.error("Database initialization failed:", error.message);
-      process.exit(1);
-    }
-
-    const db = new Level(DB_PATH, { valueEncoding: "json" });
+    // Initialize the database connection
+    db = new Level(DB_PATH, { valueEncoding: "json" });
+    console.log("Database connection established");
 
     // First degree: Direct transactions from Satoshi
-    const firstDegreeBatches = [];
     for (let i = 0; i < SATOSHI_ADDRESSES.length; i += BATCH_SIZE) {
       const batch = SATOSHI_ADDRESSES.slice(i, i + BATCH_SIZE);
+      console.log(`Processing batch of ${batch.length} Satoshi addresses...`);
 
-      for (const address of batch) {
-        console.log(`Processing Satoshi address: ${address}`);
-        const transactions = await bitcoinRPC.getAddressTransactions(address);
+      try {
+        const transactionsByAddress = await timeoutPromise(
+          () => bitcoinRPC.getAddressTransactions(batch),
+          BLOCK_FETCH_TIMEOUT, // Use longer timeout for block fetching
+          5 // More retries for initial scan
+        );
 
-        for (const tx of transactions) {
-          const isOutgoing = tx.inputs.some(
-            (input) => input.prev_out.addr === address
+        // Process transactions for each address
+        for (const [address, transactions] of Object.entries(
+          transactionsByAddress
+        )) {
+          if (!transactions || transactions.length === 0) {
+            console.log(
+              `No transactions found for address ${address}, skipping...`
+            );
+            continue;
+          }
+
+          console.log(
+            `Processing ${transactions.length} transactions for ${address}`
           );
 
-          if (isOutgoing) {
-            // Store first-degree tainted addresses
-            const outputPromises = tx.out
-              .filter(
-                (output) =>
-                  output.addr !== address &&
-                  !SATOSHI_ADDRESSES.includes(output.addr)
-              )
-              .map(async (output) => {
-                await db.put(`tainted:${output.addr}`, {
-                  txHash: tx.hash,
-                  satoshiAddress: address,
-                  originalSatoshiAddress: address,
-                  amount: output.value,
-                  degree: 1,
-                  path: [
-                    {
-                      from: address,
-                      to: output.addr,
-                      txHash: tx.hash,
-                      amount: output.value,
-                    },
-                  ],
-                  lastUpdated: Date.now(),
+          for (const tx of transactions) {
+            const isOutgoing = tx.inputs.some(
+              (input) => input.prev_out.addr === address
+            );
+
+            if (isOutgoing) {
+              // Store first-degree tainted addresses
+              const outputPromises = tx.out
+                .filter(
+                  (output) =>
+                    output.addr !== address &&
+                    !SATOSHI_ADDRESSES.includes(output.addr)
+                )
+                .map(async (output) => {
+                  await db.put(`tainted:${output.addr}`, {
+                    txHash: tx.hash,
+                    satoshiAddress: address,
+                    originalSatoshiAddress: address,
+                    amount: output.value,
+                    degree: 1,
+                    path: [
+                      {
+                        from: address,
+                        to: output.addr,
+                        txHash: tx.hash,
+                        amount: output.value,
+                      },
+                    ],
+                    lastUpdated: Date.now(),
+                  });
+
+                  return output.addr;
                 });
 
-                return output.addr;
-              });
+              const taintedAddresses = await Promise.all(outputPromises);
 
-            const taintedAddresses = await Promise.all(outputPromises);
-
-            // Queue for next degree processing
-            for (const addr of taintedAddresses) {
-              await db.put(`queue:2:${addr}`, {
-                address: addr,
-                processed: false,
-                queuedAt: Date.now(),
-              });
+              // Queue for next degree processing
+              for (const addr of taintedAddresses) {
+                await db.put(`queue:2:${addr}`, {
+                  address: addr,
+                  processed: false,
+                  queuedAt: Date.now(),
+                });
+              }
             }
           }
         }
+      } catch (error) {
+        console.error("Failed to process batch:", error.message);
+        // Add recovery logic
+        if (error.message.includes("timeout")) {
+          console.log("Attempting to resume from last saved progress...");
+          // The BitcoinRPC class will handle resuming from the last saved block
+          continue;
+        }
+        throw error;
       }
     }
 
@@ -284,8 +340,14 @@ async function updateSatoshiTransactions() {
     console.error("Error updating Satoshi transactions:", error);
     throw error;
   } finally {
-    // Make sure to close the database when done
-    await bitcoinRPC.closeDB();
+    if (db) {
+      try {
+        await db.close();
+        console.log("Database connection closed");
+      } catch (error) {
+        console.error("Error closing database:", error);
+      }
+    }
   }
 }
 

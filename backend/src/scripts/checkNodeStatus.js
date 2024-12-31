@@ -36,8 +36,8 @@ async function checkNodeStatus() {
       console.log("\nSync Status:");
       console.log(`- ${blocksRemaining} blocks remaining`);
 
-      // Estimate time remaining (assuming ~10 mins per block, but actual speed varies)
-      const estimatedMinutes = blocksRemaining * 0.5; // Assuming 2 blocks per minute on average
+      // Estimate time remaining (assuming ~30 blocks per minute, but actual speed varies)
+      const estimatedMinutes = blocksRemaining / 30; // Assuming 30 blocks per minute on average
       const hours = Math.floor(estimatedMinutes / 60);
       const minutes = Math.floor(estimatedMinutes % 60);
       console.log(

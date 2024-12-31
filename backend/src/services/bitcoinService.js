@@ -1,6 +1,4 @@
-const axios = require("axios");
-const { Level } = require("level");
-const db = new Level("./data/satoshi-transactions", { valueEncoding: "json" });
+const dbService = require("./dbService");
 
 // Known Satoshi addresses with their balances and notes
 const SATOSHI_ADDRESSES = [
@@ -25,7 +23,8 @@ const SATOSHI_NOTES = {
 
 async function checkAddressConnection(address) {
   try {
-    // Check if this is a Satoshi address
+    await dbService.init();
+
     if (SATOSHI_ADDRESSES.includes(address)) {
       return {
         isConnected: true,
@@ -37,9 +36,8 @@ async function checkAddressConnection(address) {
       };
     }
 
-    // Check if this address is already known to be tainted
     try {
-      const taintedInfo = await db.get(`tainted:${address}`);
+      const taintedInfo = await dbService.getTaintedInfo(address);
       return {
         isConnected: true,
         isSatoshiAddress: false,
@@ -48,8 +46,7 @@ async function checkAddressConnection(address) {
         transactions: await Promise.all(
           taintedInfo.path.map(async (p) => {
             try {
-              const tx = await db.get(`tx:${p.txHash}`);
-              return tx;
+              return await dbService.getTransaction(p.txHash);
             } catch (err) {
               return { hash: p.txHash, amount: p.amount };
             }
@@ -57,7 +54,6 @@ async function checkAddressConnection(address) {
         ),
       };
     } catch (err) {
-      // Not in tainted database, return no connection
       return {
         isConnected: false,
         isSatoshiAddress: false,
@@ -69,6 +65,8 @@ async function checkAddressConnection(address) {
   } catch (error) {
     console.error("Error checking address connection:", error);
     throw error;
+  } finally {
+    await dbService.close();
   }
 }
 

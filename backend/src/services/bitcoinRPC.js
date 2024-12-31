@@ -2,6 +2,35 @@ const axios = require("axios");
 const { Level } = require("level");
 const fs = require("fs");
 const path = require("path");
+const dbService = require("./dbService");
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, "../../data");
+const { Worker } = require("worker_threads");
+const os = require("os");
+
+const MAX_PARALLEL_REQUESTS = 16; // Increase from 5 to 16
+const BASE_DELAY = 500; // Decrease from 1000 to 500ms
+const MAX_RETRIES = 5; // Increase from 3 to 5
+const MEMORY_CHECK_INTERVAL = 1000; // Check memory every 1000 blocks
+const MEMORY_THRESHOLD = 0.85; // 85% memory usage threshold
+
+async function withBackoff(fn, maxRetries = 5) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt === maxRetries) {
+        throw error;
+      }
+      const delay = BASE_DELAY * Math.pow(2, attempt - 1);
+      console.log(
+        `Attempt ${attempt}/${maxRetries} failed, waiting ${
+          delay / 1000
+        }s before retry...`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
 
 class BitcoinRPC {
   constructor() {
@@ -9,16 +38,12 @@ class BitcoinRPC {
     this.port = process.env.BITCOIN_RPC_PORT || 8332;
     this.user = process.env.BITCOIN_RPC_USER;
     this.pass = process.env.BITCOIN_RPC_PASS;
-    this.timeout = parseInt(process.env.BITCOIN_RPC_TIMEOUT) || 30000;
+    this.timeout = parseInt(process.env.BITCOIN_RPC_TIMEOUT) || 300000;
+    this.initialized = false; // Add initialization flag
 
     if (!this.user || !this.pass) {
       throw new Error("Bitcoin RPC credentials not configured");
     }
-
-    console.log(`Connecting to Bitcoin node at ${this.host}:${this.port}`);
-
-    // Test connection immediately
-    this.testConnection();
 
     this.client = axios.create({
       baseURL: `http://${this.host}:${this.port}`,
@@ -37,6 +62,45 @@ class BitcoinRPC {
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
     }
+
+    this.txCache = new Map();
+    this.TX_CACHE_SIZE = 10000; // Adjust based on your memory
+    this.addressIndex = new Map(); // address -> Set of block heights
+
+    // Performance tuning
+    this.config = {
+      batchSize: parseInt(process.env.BITCOIN_BATCH_SIZE) || 100,
+      maxParallelRequests: parseInt(process.env.BITCOIN_MAX_PARALLEL) || 16,
+      cacheSize: parseInt(process.env.BITCOIN_CACHE_SIZE) || 10000,
+      retryDelay: parseInt(process.env.BITCOIN_RETRY_DELAY) || 500,
+      maxRetries: parseInt(process.env.BITCOIN_MAX_RETRIES) || 5,
+      memoryThreshold: parseFloat(process.env.BITCOIN_MEMORY_THRESHOLD) || 0.85,
+      blockTimeout: parseInt(process.env.BITCOIN_BLOCK_TIMEOUT) || 300000, // 5 minutes for block fetching
+    };
+
+    // Add database state tracking
+    this.dbStatus = {
+      isOpen: false,
+      instance: null,
+    };
+
+    // Initialize worker pool
+    this.workerPool = {
+      size: Math.max(1, Math.min(os.cpus().length - 1, 4)), // Use up to 4 cores
+      workers: [],
+      busy: new Set(),
+    };
+
+    // Add status line tracking
+    this.lastLines = 0;
+  }
+
+  async initialize() {
+    if (this.initialized) return;
+
+    console.log(`Connecting to Bitcoin node at ${this.host}:${this.port}`);
+    await this.testConnection();
+    this.initialized = true;
   }
 
   async testConnection() {
@@ -140,181 +204,238 @@ ${error.message}
     }
   }
 
-  async initDB() {
-    if (!this.db) {
-      this.db = new Level("./data/satoshi-transactions", {
-        valueEncoding: "json",
-      });
-      // Wait for the database to be ready
-      await new Promise((resolve, reject) => {
-        this.db.once("ready", resolve);
-        this.db.once("error", reject);
-      });
-    }
-    return this.db;
-  }
-
-  async closeDB() {
-    if (this.db) {
-      await this.db.close();
-      this.db = null;
-    }
-  }
-
-  async call(method, params = []) {
+  async getAddressTransactions(addresses) {
     try {
-      const response = await this.client.post("/", {
-        jsonrpc: "1.0",
-        id: Date.now(),
-        method,
-        params,
-      });
+      await this.initialize();
 
-      if (response.data.error) {
-        console.error(`RPC Error in ${method}:`, response.data.error); // Add detailed error logging
-        throw new Error(`RPC Error: ${response.data.error.message}`);
+      const blockchainInfo = await this.getBlockchainInfo();
+      const currentHeight = blockchainInfo.blocks;
+      this.totalBlocks = currentHeight;
+      this.startTime = Date.now();
+
+      console.log(this.formatInitialTable(this.totalBlocks, addresses.length));
+
+      // Initialize database connection
+      const db = await this.openDatabase();
+
+      let startBlock = 0;
+      let transactionsByAddress;
+      let isResume = false;
+
+      try {
+        const savedProgress = await db.get("scan_progress");
+        startBlock = savedProgress.lastBlock + 1;
+        transactionsByAddress = new Map(
+          Object.entries(savedProgress.transactions).map(([addr, txs]) => [
+            addr,
+            new Set(txs),
+          ])
+        );
+        console.log(`Resuming scan from block ${startBlock}`);
+        isResume = true;
+      } catch (err) {
+        // No saved progress, start fresh
+        transactionsByAddress = new Map(
+          addresses.map((addr) => [addr, new Set()])
+        );
+        console.log("Starting fresh scan");
       }
 
-      return response.data.result;
+      // Process blocks in batches
+      for (let height = startBlock; height <= currentHeight; height += 1000) {
+        const endHeight = Math.min(height + 1000, currentHeight);
+
+        try {
+          await this.processBlockRange(
+            height,
+            endHeight,
+            addresses,
+            transactionsByAddress
+          );
+
+          // Save progress and show overall status
+          if (this.dbStatus.isOpen) {
+            await db.put("scan_progress", {
+              lastBlock: endHeight,
+              transactions: Object.fromEntries(
+                Array.from(transactionsByAddress.entries()).map(
+                  ([addr, txs]) => [addr, Array.from(txs)]
+                )
+              ),
+              lastUpdated: Date.now(),
+            });
+
+            // Calculate time estimates
+            const elapsedTime = Date.now() - this.startTime;
+            const blocksProcessed = endHeight - startBlock;
+            const blocksRemaining = currentHeight - endHeight;
+            const timePerBlock = elapsedTime / blocksProcessed;
+            const estimatedTimeRemaining = timePerBlock * blocksRemaining;
+
+            console.log(`
+╔════════════════════════════════════════════════════╗
+║ Scan Status Update                                 ║
+╠════════════════════════════════════════════════════╣
+║ Progress: ${((endHeight / currentHeight) * 100).toFixed(
+              2
+            )}%                              ║
+║ Current Block: ${endHeight.toLocaleString()}                        ║
+║ Time Remaining: ${this.formatTime(estimatedTimeRemaining)}               ║
+║ Transactions Found: ${Array.from(transactionsByAddress.values())
+              .reduce((acc, set) => acc + set.size, 0)
+              .toLocaleString()}                    ║
+╚════════════════════════════════════════════════════╝
+`);
+          }
+        } catch (error) {
+          console.error(
+            `Error processing block range ${height}-${endHeight}:`,
+            error.message
+          );
+
+          // Save progress before retrying
+          try {
+            if (this.dbStatus.isOpen) {
+              await db.put("scan_progress", {
+                lastBlock: height - 1,
+                transactions: Object.fromEntries(
+                  Array.from(transactionsByAddress.entries()).map(
+                    ([addr, txs]) => [addr, Array.from(txs)]
+                  )
+                ),
+                lastUpdated: Date.now(),
+              });
+            }
+          } catch (saveError) {
+            console.error("Error saving progress:", saveError.message);
+          }
+
+          // Close and reopen database
+          await this.closeDatabase();
+          await this.openDatabase();
+
+          // Don't show initial messages on retry if we've already started
+          if (!isResume) {
+            isResume = true;
+          }
+
+          continue; // Continue with next batch
+        }
+      }
+
+      // Final cleanup
+      await this.closeDatabase();
+      return this.formatResults(addresses, transactionsByAddress);
     } catch (error) {
-      console.error(`Bitcoin RPC error (${method}):`, {
-        message: error.message,
-        response: error.response?.data,
-        code: error.code,
-        method,
-        params,
-        stack: error.stack, // Add stack trace
-      });
+      await this.closeDatabase();
       throw error;
     }
   }
 
-  // Get transaction details
-  async getTransaction(txid) {
-    try {
-      // First try getrawtransaction
-      const tx = await this.call("getrawtransaction", [txid, true]);
-      return this.formatTransaction(tx);
-    } catch (error) {
-      // If getrawtransaction fails, try gettransaction as fallback
+  // Add this new method to handle block range processing
+  async processBlockRange(
+    startHeight,
+    endHeight,
+    addresses,
+    transactionsByAddress
+  ) {
+    // Initialize worker pool if needed
+    if (this.workerPool.workers.length === 0) {
+      await this.initWorkerPool();
+    }
+
+    const totalBlocks = endHeight - startHeight;
+    let processedBlocks = 0;
+
+    for (let h = startHeight; h < endHeight; h += this.workerPool.size) {
+      const chunkEnd = Math.min(h + this.workerPool.size, endHeight);
+
+      processedBlocks += chunkEnd - h;
+      const batchProgress = ((processedBlocks / totalBlocks) * 100).toFixed(2);
+      const overallProgress = ((chunkEnd / this.totalBlocks) * 100).toFixed(2);
+
+      // Use process.stdout.write to update in place
+      process.stdout.write(
+        this.formatProgressTable(
+          chunkEnd,
+          this.totalBlocks,
+          overallProgress,
+          batchProgress
+        ) + "\n"
+      );
+
       try {
-        const tx = await this.call("gettransaction", [txid, true]);
-        return this.formatTransaction({
-          ...tx,
-          txid: tx.txid || txid,
-          vin: tx.vin || [],
-          vout: tx.vout || [],
-        });
-      } catch (fallbackError) {
-        console.error("Failed to get transaction:", fallbackError);
-        throw new Error(
-          "Unable to fetch transaction. Make sure -txindex is enabled or the transaction is in the wallet."
+        // Get block hashes with increased timeout
+        const blockHashes = await withBackoff(async () => {
+          const client = axios.create({
+            ...this.client.defaults,
+            timeout: this.config.blockTimeout,
+          });
+          return this.getBlockHashes(h, chunkEnd, client);
+        }, 5); // Increase retries to 5
+
+        // Process blocks in smaller chunks with better error handling
+        const blocks = await Promise.all(
+          blockHashes.map(
+            (hash) =>
+              withBackoff(async () => {
+                const client = axios.create({
+                  ...this.client.defaults,
+                  timeout: this.config.blockTimeout,
+                });
+                const block = await this.call("getblock", [hash, 2], client);
+                if (!block)
+                  throw new Error(`Failed to get block for hash ${hash}`);
+                return block;
+              }, 5) // Increase retries to 5
+          )
         );
-      }
-    }
-  }
 
-  // Get address transactions
-  async getAddressTransactions(address) {
-    await this.initDB(); // Ensure DB is initialized
-    try {
-      console.log(`Getting transactions for address: ${address}`); // Add debug logging
-
-      // Get current block height
-      const info = await this.getBlockchainInfo();
-      if (!info || !info.blocks) {
-        throw new Error("Could not get current block height");
-      }
-
-      const currentHeight = info.blocks;
-      console.log(`Current block height: ${currentHeight}`); // Add debug logging
-
-      // Get the last processed block for this address
-      let startHeight = 0;
-      try {
-        const lastProcessed = await this.db.get(`lastBlock:${address}`);
-        startHeight = lastProcessed + 1;
-        console.log(`Resuming scan from block ${startHeight} for ${address}`);
-      } catch (err) {
-        console.log(`Starting fresh scan for ${address}`);
-      }
-
-      if (startHeight > currentHeight) {
-        console.log(`Already up to date for ${address}`);
-        return [];
-      }
-
-      const transactions = new Set();
-
-      // Scan blocks in batches to avoid overwhelming the node
-      const batchSize = 10;
-      for (
-        let height = startHeight;
-        height <= currentHeight;
-        height += batchSize
-      ) {
-        const endHeight = Math.min(height + batchSize, currentHeight);
-        let batchSuccess = true;
-
-        try {
-          for (let h = height; h <= endHeight; h++) {
-            const blockHash = await this.call("getblockhash", [h]);
-            const block = await this.call("getblock", [blockHash, 2]); // 2 for verbose tx data
-
-            // Check each transaction in the block
-            for (const tx of block.tx) {
-              // Check outputs for the address
-              const hasAddress = tx.vout.some((vout) =>
-                vout.scriptPubKey.addresses?.includes(address)
-              );
-
-              // Check inputs for the address
-              const hasAddressInput = tx.vin.some((vin) =>
-                vin.prevout?.scriptPubKey?.addresses?.includes(address)
-              );
-
-              if (hasAddress || hasAddressInput) {
-                transactions.add(this.formatTransaction(tx));
-              }
-            }
-
-            // Update the last processed block after each successful block
-            await this.db.put(`lastBlock:${address}`, h);
+        // Process valid blocks
+        const validBlocks = blocks.filter(Boolean);
+        for (const block of validBlocks) {
+          try {
+            await this.processBlockTransactions(
+              block,
+              addresses,
+              transactionsByAddress
+            );
+          } catch (error) {
+            console.error(
+              `Error processing block ${block.height}:`,
+              error.message
+            );
+            // Continue with next block instead of failing completely
+            continue;
           }
-        } catch (blockError) {
-          console.error(
-            `Error processing blocks ${height} to ${endHeight}:`,
-            blockError.message
-          );
-          batchSuccess = false;
-          // Don't update lastBlock if there was an error
-          break;
         }
-
-        if (batchSuccess) {
-          console.log(
-            `Processed blocks ${height} to ${endHeight} (${Math.round(
-              (endHeight / currentHeight) * 100
-            )}%)`
-          );
-        }
+      } catch (error) {
+        console.error(`Error in block range ${h}-${chunkEnd}:`, error.message);
+        // Throw to trigger retry at higher level
+        throw error;
       }
-
-      return Array.from(transactions);
-    } catch (error) {
-      console.error("Failed to get address transactions:", error);
-      throw new Error(`Unable to fetch address transactions: ${error.message}`);
     }
   }
 
-  // Add method to get scanning progress
+  // Helper method to format results consistently
+  formatResults(addresses, transactionsByAddress) {
+    return addresses.length === 1
+      ? Array.from(transactionsByAddress.get(addresses[0]))
+      : Object.fromEntries(
+          Array.from(transactionsByAddress.entries()).map(([addr, txs]) => [
+            addr,
+            Array.from(txs),
+          ])
+        );
+  }
+
   async getAddressScanProgress(address) {
     try {
       const info = await this.getBlockchainInfo();
       const currentHeight = info.blocks;
 
       try {
-        const lastProcessed = await this.db.get(`lastBlock:${address}`);
+        const lastProcessed = await dbService.getLastProcessedBlock(address);
         return {
           lastProcessed,
           currentHeight,
@@ -334,9 +455,14 @@ ${error.message}
 
   // Format transaction to match our expected structure
   formatTransaction(tx) {
+    const txid = tx.txid || tx.hash;
+    if (this.txCache.has(txid)) {
+      return this.txCache.get(txid);
+    }
+
     try {
-      return {
-        hash: tx.txid || tx.hash,
+      const formatted = {
+        hash: txid,
         time: tx.time,
         inputs: tx.vin.map((input) => ({
           prev_out: {
@@ -355,6 +481,16 @@ ${error.message}
           }))
           .filter((out) => out.addr), // Filter out non-standard outputs
       };
+
+      // Cache the result
+      if (this.txCache.size >= this.TX_CACHE_SIZE) {
+        // Remove oldest entry
+        const firstKey = this.txCache.keys().next().value;
+        this.txCache.delete(firstKey);
+      }
+      this.txCache.set(txid, formatted);
+
+      return formatted;
     } catch (error) {
       console.error("Error formatting transaction:", error);
       return {
@@ -384,7 +520,10 @@ ${error.message}
   async getBlockchainInfo() {
     try {
       const info = await this.call("getblockchaininfo");
-      console.log("Blockchain info:", info);
+      // Only log blockchain info if not initialized
+      if (!this.initialized) {
+        console.log("Blockchain info:", info);
+      }
       return info;
     } catch (error) {
       console.error("Error getting blockchain info:", error);
@@ -394,6 +533,232 @@ ${error.message}
 
   async getRawMemPool() {
     return this.call("getrawmempool");
+  }
+
+  async call(method, params = [], client = this.client) {
+    try {
+      const response = await client.post("/", {
+        jsonrpc: "1.0",
+        id: Date.now(),
+        method,
+        params,
+      });
+
+      if (response.data.error) {
+        throw new Error(`RPC Error: ${response.data.error.message}`);
+      }
+
+      return response.data.result;
+    } catch (error) {
+      console.error(`Bitcoin RPC error (${method}):`, error.message);
+      throw error;
+    }
+  }
+
+  async getTransaction(txid) {
+    try {
+      // First try getrawtransaction
+      const tx = await this.call("getrawtransaction", [txid, true]);
+      return this.formatTransaction(tx);
+    } catch (error) {
+      // If getrawtransaction fails, try gettransaction as fallback
+      try {
+        const tx = await this.call("gettransaction", [txid, true]);
+        return this.formatTransaction({
+          ...tx,
+          txid: tx.txid || txid,
+          vin: tx.vin || [],
+          vout: tx.vout || [],
+        });
+      } catch (fallbackError) {
+        console.error("Failed to get transaction:", fallbackError);
+        throw new Error(
+          "Unable to fetch transaction. Make sure -txindex is enabled or the transaction is in the wallet."
+        );
+      }
+    }
+  }
+
+  async getClient() {
+    return this.client;
+  }
+
+  async getBlockHashes(startHeight, endHeight) {
+    const hashes = [];
+    const batchSize = 100;
+
+    for (let i = startHeight; i < endHeight; i += batchSize) {
+      const batch = Array.from(
+        { length: Math.min(batchSize, endHeight - i) },
+        (_, j) => i + j
+      );
+
+      const batchHashes = await Promise.all(
+        batch.map((height) => this.call("getblockhash", [height]))
+      );
+      hashes.push(...batchHashes);
+    }
+
+    return hashes;
+  }
+
+  // Add method to update index
+  async updateAddressIndex(address, blockHeight) {
+    if (!this.addressIndex.has(address)) {
+      this.addressIndex.set(address, new Set());
+    }
+    this.addressIndex.get(address).add(blockHeight);
+  }
+
+  // Add this method to the BitcoinRPC class
+  async processBlockTransactions(block, addresses, transactionsByAddress) {
+    for (const tx of block.tx) {
+      const outputAddresses = tx.vout.flatMap(
+        (vout) => vout.scriptPubKey.addresses || []
+      );
+      const inputAddresses = tx.vin.flatMap(
+        (vin) => vin.prevout?.scriptPubKey?.addresses || []
+      );
+
+      const involvedAddresses = new Set([
+        ...outputAddresses,
+        ...inputAddresses,
+      ]);
+
+      // Check if any of our target addresses are involved
+      let isRelevant = false;
+      for (const addr of addresses) {
+        if (involvedAddresses.has(addr)) {
+          isRelevant = true;
+          transactionsByAddress.get(addr).add(this.formatTransaction(tx));
+
+          // Update address index
+          await this.updateAddressIndex(addr, block.height);
+        }
+      }
+
+      // If transaction is relevant, cache it
+      if (isRelevant && !this.txCache.has(tx.txid)) {
+        if (this.txCache.size >= this.TX_CACHE_SIZE) {
+          // Remove oldest entry
+          const firstKey = this.txCache.keys().next().value;
+          this.txCache.delete(firstKey);
+        }
+        this.txCache.set(tx.txid, this.formatTransaction(tx));
+      }
+    }
+  }
+
+  // Add database management methods
+  async openDatabase() {
+    if (!this.dbStatus.isOpen) {
+      this.dbStatus.instance = new Level(path.join(DB_PATH, "scan_progress"), {
+        valueEncoding: "json",
+        createIfMissing: true,
+      });
+      this.dbStatus.isOpen = true;
+    }
+    return this.dbStatus.instance;
+  }
+
+  async closeDatabase() {
+    if (this.dbStatus.isOpen && this.dbStatus.instance) {
+      await this.dbStatus.instance.close();
+      this.dbStatus.isOpen = false;
+      this.dbStatus.instance = null;
+    }
+  }
+
+  async initWorkerPool() {
+    for (let i = 0; i < this.workerPool.size; i++) {
+      const worker = new Worker(
+        path.join(__dirname, "../workers/blockProcessor.js")
+      );
+      this.workerPool.workers.push(worker);
+    }
+  }
+
+  async getAvailableWorker() {
+    const worker = this.workerPool.workers.find(
+      (w) => !this.workerPool.busy.has(w)
+    );
+    if (worker) {
+      this.workerPool.busy.add(worker);
+      return worker;
+    }
+    return null;
+  }
+
+  // Helper function to format time
+  formatTime(ms) {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+
+    if (hours > 0) {
+      return `${hours}h ${minutes % 60}m`;
+    }
+    if (minutes > 0) {
+      return `${minutes}m ${seconds % 60}s`;
+    }
+    return `${seconds}s`;
+  }
+
+  // Helper to clear previous lines
+  clearLines(count) {
+    process.stdout.write(`\x1b[${count}A\x1b[0J`);
+  }
+
+  // Update the table formatting methods
+  formatProgressTable(current, total, overallProgress, batchProgress) {
+    const formattedCurrent = current.toLocaleString("en-US", {
+      maximumFractionDigits: 0,
+    });
+    const formattedTotal = total.toLocaleString("en-US", {
+      maximumFractionDigits: 0,
+    });
+
+    const table = [
+      "┌────────────────────────────────────────────────────┐",
+      "│ Progress Update                                    │",
+      "├────────────────────────────────────────────────────┤",
+      `│ Current Block:     ${formattedCurrent.padEnd(
+        10
+      )} of ${formattedTotal.padEnd(17)} │`,
+      `│ Overall Progress:  ${overallProgress.padStart(
+        7
+      )}%                        │`,
+      `│ Batch Progress:    ${batchProgress.padStart(
+        7
+      )}%                        │`,
+      "└────────────────────────────────────────────────────┘",
+    ].join("\n");
+
+    // Clear previous table if it exists
+    if (this.lastLines > 0) {
+      this.clearLines(this.lastLines);
+    }
+
+    // Update line count
+    this.lastLines = table.split("\n").length;
+
+    return table;
+  }
+
+  formatInitialTable(totalBlocks, addressCount) {
+    const formattedTotal = totalBlocks.toLocaleString("en-US", {
+      maximumFractionDigits: 0,
+    });
+    const formattedAddresses = addressCount.toString();
+
+    return [
+      "┌────────────────────────────────────────────────────┐",
+      "│ Starting Block Scan                                │",
+      "├────────────────────────────────────────────────────┤",
+      `│ Total Blocks:      ${formattedTotal.padEnd(31)} │`,
+      `│ Addresses to Scan: ${formattedAddresses.padEnd(31)} │`,
+      "└────────────────────────────────────────────────────┘",
+    ].join("\n");
   }
 }
 

@@ -32,9 +32,23 @@ export default function Home() {
       return;
     }
 
-    if (!isValidBitcoinAddress(trimmedAddress)) {
+    // Check address format first
+    const isValidFormat =
+      trimmedAddress.startsWith("1") ||
+      trimmedAddress.startsWith("3") ||
+      trimmedAddress.toLowerCase().startsWith("bc1");
+
+    if (!isValidFormat) {
       setError(
         "Please enter a valid Bitcoin address (starting with 1, 3, or bc1)"
+      );
+      setIsValidating(false);
+      return;
+    }
+
+    if (!isValidBitcoinAddress(trimmedAddress)) {
+      setError(
+        "Invalid Bitcoin address - the checksum verification failed. Please check for typos."
       );
       setIsValidating(false);
       return;

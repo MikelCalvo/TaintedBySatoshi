@@ -80,10 +80,18 @@ BITCOIN_RPC_TIMEOUT=30000
 DB_PATH=./data/satoshi-transactions
 
 # Processing Configuration
-MAX_DEGREE=100           # Maximum tinting degree to process
-BATCH_SIZE=100          # Number of transactions to process in parallel
-CACHE_TTL=3600         # Cache time-to-live in seconds
-UPDATE_INTERVAL=3600   # How often to update the database in seconds
+MAX_DEGREE=100                    # Maximum tinting degree to process
+BATCH_SIZE=250                   # Number of transactions to process in parallel
+CACHE_TTL=3600                   # Cache time-to-live in seconds
+UPDATE_INTERVAL=3600             # How often to update the database in seconds
+
+# Performance Tuning
+BITCOIN_BATCH_SIZE=250           # Number of blocks to process in one batch
+BITCOIN_MAX_PARALLEL=32          # Number of parallel RPC requests
+BITCOIN_CACHE_SIZE=50000         # Number of transactions to keep in memory
+BITCOIN_RETRY_DELAY=500          # Milliseconds to wait between retries
+BITCOIN_MAX_RETRIES=5            # Number of times to retry failed requests
+BITCOIN_MEMORY_THRESHOLD=0.90    # Memory usage threshold for GC
 ```
 
 Frontend `.env`:
@@ -211,3 +219,81 @@ Check if a Bitcoin address has any connection to Satoshi's wallets.
 - The initial database build can take several hours depending on your Bitcoin node and system performance.
 - The application supports all types of Bitcoin addresses (Legacy P2PKH, P2SH, and Native SegWit).
 - While Satoshi only used P2PKH addresses, the tracking system follows coins through all address types to maintain complete traceability.
+
+## 🚀 Performance Optimization
+
+### Bitcoin Core Configuration
+
+Add these settings to your bitcoin.conf for optimal performance:
+
+```conf
+# RPC Settings
+rpcworkqueue=128     # Increased queue for parallel requests
+rpcthreads=8        # Adjust based on CPU cores
+rpctimeout=60       # Increased timeout for complex queries
+
+# Performance Settings
+dbcache=4096        # Adjust based on available RAM (MB)
+par=8               # Parallel script verification threads
+maxconnections=125  # Default is good for most cases
+txindex=1          # Required for transaction lookups
+```
+
+### Node.js Memory Management
+
+The application uses advanced memory management techniques:
+
+- Garbage collection optimization with `--expose-gc`
+- Increased heap size with `--max-old-space-size`
+- Transaction caching
+- Batch processing
+- Memory usage monitoring
+
+### Available Scripts
+
+#### `npm run update-satoshi-data`
+
+Updates the local database with optimized settings:
+
+```bash
+node --expose-gc --max-old-space-size=8192 src/scripts/updateSatoshiData.js
+```
+
+This script includes:
+
+- Automatic garbage collection
+- 8GB heap size allocation
+- Transaction caching
+- Parallel block processing
+- Memory usage monitoring
+- Automatic retry with exponential backoff
+
+### System Requirements
+
+Recommended hardware for optimal performance:
+
+- CPU: 4+ cores
+- RAM: 16GB+ (32GB recommended)
+- Storage: SSD/NVMe with 10GB+ free space
+- Network: Stable connection with good bandwidth
+
+## Environment Variables
+
+Updated environment variables table:
+
+| Variable                   | Description                                   | Default     |
+| -------------------------- | --------------------------------------------- | ----------- |
+| `DB_PATH`                  | Path to store the database files              | `./data`    |
+| `MAX_DEGREE`               | Maximum number of transaction hops to track   | `100`       |
+| `BATCH_SIZE`               | Number of transactions to process in parallel | `250`       |
+| `BITCOIN_RPC_HOST`         | Bitcoin node hostname                         | `localhost` |
+| `BITCOIN_RPC_PORT`         | Bitcoin node RPC port                         | `8332`      |
+| `BITCOIN_RPC_USER`         | Bitcoin node RPC username                     | -           |
+| `BITCOIN_RPC_PASS`         | Bitcoin node RPC password                     | -           |
+| `BITCOIN_RPC_TIMEOUT`      | RPC request timeout in milliseconds           | `300000`    |
+| `BITCOIN_BATCH_SIZE`       | Number of blocks per batch                    | `250`       |
+| `BITCOIN_MAX_PARALLEL`     | Maximum parallel RPC requests                 | `32`        |
+| `BITCOIN_CACHE_SIZE`       | Transaction cache size                        | `50000`     |
+| `BITCOIN_RETRY_DELAY`      | Retry delay in milliseconds                   | `500`       |
+| `BITCOIN_MAX_RETRIES`      | Maximum retry attempts                        | `5`         |
+| `BITCOIN_MEMORY_THRESHOLD` | Memory usage threshold for GC                 | `0.90`      |

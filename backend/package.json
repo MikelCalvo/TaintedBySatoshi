@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "update-satoshi-data": "node src/scripts/updateSatoshiData.js",
+    "update-satoshi-data": "node --expose-gc --max-old-space-size=8192 src/scripts/updateSatoshiData.js",
     "check-node": "node src/scripts/checkNodeStatus.js"
   },
   "dependencies": {
