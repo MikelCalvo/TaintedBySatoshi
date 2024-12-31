@@ -18,8 +18,7 @@ const FETCH_TIMEOUT = 300000; // 5 minutes
 const BLOCK_FETCH_TIMEOUT = 600000; // 10 minutes for initial block fetch
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY = 30000; // 30 seconds
-const PROGRESS_TABLE_LINES = 7; // Number of lines in our progress table
-const STATUS_UPDATE_LINES = 7; // Number of lines in the status update box
+const PROGRESS_TABLE_LINES = 6;
 
 // Ensure the database directory exists
 const dataDir = path.join(
@@ -37,11 +36,6 @@ if (!isMainThread) {
     .catch((error) =>
       parentPort.postMessage({ success: false, error: error.message })
     );
-}
-
-// Create a timeout wrapper function
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // Modify the timeoutPromise function
@@ -129,6 +123,12 @@ async function processAddress(address, currentDegree, db) {
           )
           .map(async (output) => {
             try {
+              // Validate output amount
+              if (!output.value || output.value <= 0) {
+                console.warn(`Invalid amount in transaction ${tx.hash} output`);
+                return null;
+              }
+
               // Check if we already have a shorter path
               try {
                 const existing = await db.get(`tainted:${output.addr}`);
@@ -281,26 +281,18 @@ function clearLines(count) {
   process.stdout.write(`\x1b[${count}A\x1b[0J`);
 }
 
-function updateProgress(
-  currentBlock,
-  totalBlocks,
-  overallProgress,
-  batchProgress
-) {
-  // Clear both progress displays (if they exist)
-  clearLines(PROGRESS_TABLE_LINES + STATUS_UPDATE_LINES);
+function updateProgress(currentBlock, totalBlocks, overallProgress) {
+  // Clear previous progress display
+  clearLines(PROGRESS_TABLE_LINES);
 
   const progressTable = [
     "┌────────────────────────────────────────────────────┐",
-    "│ Progress Update                                    │",
+    "│ Block Scan Progress                                │",
     "├────────────────────────────────────────────────────┤",
     `│ Current Block:     ${currentBlock
       .toLocaleString()
-      .padEnd(10)} of ${totalBlocks.toLocaleString().padEnd(10)} │`,
+      .padEnd(10)} of ${totalBlocks.toLocaleString().padEnd(17)} │`,
     `│ Overall Progress:  ${overallProgress
-      .toFixed(2)
-      .padStart(7)}%                        │`,
-    `│ Batch Progress:    ${batchProgress
       .toFixed(2)
       .padStart(7)}%                        │`,
     "└────────────────────────────────────────────────────┘",
@@ -311,25 +303,41 @@ function updateProgress(
 
 async function updateSatoshiTransactions() {
   let db;
+  let currentDegree = 1;
 
   try {
     console.log("Starting Satoshi transactions update...");
-
-    // Initialize Bitcoin RPC once
     await bitcoinRPC.initialize();
 
-    // Initialize the database connection
+    // Get initial blockchain info
+    const { blocks: totalBlocks } = await bitcoinRPC.getBlockchainInfo();
+
     db = new Level(DB_PATH, { valueEncoding: "json" });
     console.log("Database connection established");
+
+    // Initialize taint data for Satoshi addresses
+    for (const address of SATOSHI_ADDRESSES) {
+      await db.put(`tainted:${address}`, {
+        txHash: null,
+        originalSatoshiAddress: address,
+        amount: 0, // Will be updated when processing transactions
+        degree: 0,
+        path: [],
+        lastUpdated: Date.now(),
+      });
+    }
 
     // First degree: Direct transactions from Satoshi
     for (let i = 0; i < SATOSHI_ADDRESSES.length; i += BATCH_SIZE) {
       const batch = SATOSHI_ADDRESSES.slice(i, i + BATCH_SIZE);
-      console.log(`Processing batch of ${batch.length} Satoshi addresses...`);
 
       try {
         const transactionsByAddress = await timeoutPromise(
-          () => bitcoinRPC.getAddressTransactions(batch),
+          () =>
+            bitcoinRPC.getAddressTransactions(batch, (currentBlock) => {
+              const overallProgress = (currentBlock / totalBlocks) * 100;
+              updateProgress(currentBlock, totalBlocks, overallProgress);
+            }),
           BLOCK_FETCH_TIMEOUT,
           5
         );
@@ -337,70 +345,15 @@ async function updateSatoshiTransactions() {
         for (const [address, transactions] of Object.entries(
           transactionsByAddress
         )) {
-          if (!transactions || transactions.length === 0) {
-            continue;
-          }
+          if (!transactions || transactions.length === 0) continue;
 
-          // Update progress display
           const currentBlock = transactions[0].block_height || 0;
-          const totalBlocks = await bitcoinRPC.getBlockCount();
           const overallProgress = (currentBlock / totalBlocks) * 100;
-          const batchProgress = (i / SATOSHI_ADDRESSES.length) * 100;
 
-          updateProgress(
-            currentBlock,
-            totalBlocks,
-            overallProgress,
-            batchProgress
-          );
+          updateProgress(currentBlock, totalBlocks, overallProgress);
 
-          // Process transactions for each address
-          for (const tx of transactions) {
-            const isOutgoing = tx.inputs.some(
-              (input) => input.prev_out.addr === address
-            );
-
-            if (isOutgoing) {
-              // Store first-degree tainted addresses
-              const outputPromises = tx.out
-                .filter(
-                  (output) =>
-                    output.addr !== address &&
-                    !SATOSHI_ADDRESSES.includes(output.addr)
-                )
-                .map(async (output) => {
-                  await db.put(`tainted:${output.addr}`, {
-                    txHash: tx.hash,
-                    satoshiAddress: address,
-                    originalSatoshiAddress: address,
-                    amount: output.value,
-                    degree: 1,
-                    path: [
-                      {
-                        from: address,
-                        to: output.addr,
-                        txHash: tx.hash,
-                        amount: output.value,
-                      },
-                    ],
-                    lastUpdated: Date.now(),
-                  });
-
-                  return output.addr;
-                });
-
-              const taintedAddresses = await Promise.all(outputPromises);
-
-              // Queue for next degree processing
-              for (const addr of taintedAddresses) {
-                await db.put(`queue:2:${addr}`, {
-                  address: addr,
-                  processed: false,
-                  queuedAt: Date.now(),
-                });
-              }
-            }
-          }
+          // Process transactions...
+          await processAddress(address, currentDegree, db);
         }
       } catch (error) {
         console.error("\nFailed to process batch:", error.message);
@@ -413,7 +366,7 @@ async function updateSatoshiTransactions() {
     }
 
     // Process subsequent degrees using worker threads
-    let currentDegree = 2;
+    currentDegree = 2;
     let hasMore = true;
 
     while (hasMore && currentDegree <= MAX_DEGREE) {

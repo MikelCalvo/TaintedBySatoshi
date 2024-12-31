@@ -12,6 +12,7 @@ const BASE_DELAY = 500; // Decrease from 1000 to 500ms
 const MAX_RETRIES = 5; // Increase from 3 to 5
 const MEMORY_CHECK_INTERVAL = 1000; // Check memory every 1000 blocks
 const MEMORY_THRESHOLD = 0.85; // 85% memory usage threshold
+const BLOCK_BATCH_SIZE = 1000; // Process 1000 blocks at a time
 
 async function withBackoff(fn, maxRetries = 5) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -76,6 +77,8 @@ class BitcoinRPC {
       maxRetries: parseInt(process.env.BITCOIN_MAX_RETRIES) || 5,
       memoryThreshold: parseFloat(process.env.BITCOIN_MEMORY_THRESHOLD) || 0.85,
       blockTimeout: parseInt(process.env.BITCOIN_BLOCK_TIMEOUT) || 300000, // 5 minutes for block fetching
+      blockBatchSize:
+        parseInt(process.env.BITCOIN_BLOCK_BATCH_SIZE) || BLOCK_BATCH_SIZE,
     };
 
     // Add database state tracking
@@ -204,7 +207,7 @@ ${error.message}
     }
   }
 
-  async getAddressTransactions(addresses) {
+  async getAddressTransactions(addresses, progressCallback) {
     try {
       await this.initialize();
 
@@ -213,14 +216,11 @@ ${error.message}
       this.totalBlocks = currentHeight;
       this.startTime = Date.now();
 
-      console.log(this.formatInitialTable(this.totalBlocks, addresses.length));
-
       // Initialize database connection
       const db = await this.openDatabase();
 
       let startBlock = 0;
       let transactionsByAddress;
-      let isResume = false;
 
       try {
         const savedProgress = await db.get("scan_progress");
@@ -232,7 +232,6 @@ ${error.message}
           ])
         );
         console.log(`Resuming scan from block ${startBlock}`);
-        isResume = true;
       } catch (err) {
         // No saved progress, start fresh
         transactionsByAddress = new Map(
@@ -241,22 +240,31 @@ ${error.message}
         console.log("Starting fresh scan");
       }
 
-      // Process blocks in batches
-      for (let height = startBlock; height <= currentHeight; height += 1000) {
-        const endHeight = Math.min(height + 1000, currentHeight);
-
+      // Process one block at a time
+      for (let height = startBlock; height < currentHeight; height++) {
         try {
-          await this.processBlockRange(
-            height,
-            endHeight,
+          // Update progress through callback
+          if (progressCallback) {
+            progressCallback(height);
+          }
+
+          // Get block hash
+          const hash = await this.call("getblockhash", [height]);
+
+          // Get full block data
+          const block = await this.call("getblock", [hash, 2]);
+
+          // Process the block
+          await this.processBlockTransactions(
+            block,
             addresses,
             transactionsByAddress
           );
 
-          // Save progress and show overall status
+          // Save progress every block
           if (this.dbStatus.isOpen) {
             await db.put("scan_progress", {
-              lastBlock: endHeight,
+              lastBlock: height,
               transactions: Object.fromEntries(
                 Array.from(transactionsByAddress.entries()).map(
                   ([addr, txs]) => [addr, Array.from(txs)]
@@ -264,155 +272,61 @@ ${error.message}
               ),
               lastUpdated: Date.now(),
             });
-
-            // Calculate time estimates
-            const elapsedTime = Date.now() - this.startTime;
-            const blocksProcessed = endHeight - startBlock;
-            const blocksRemaining = currentHeight - endHeight;
-            const timePerBlock = elapsedTime / blocksProcessed;
-            const estimatedTimeRemaining = timePerBlock * blocksRemaining;
-
-            console.log(`
-╔════════════════════════════════════════════════════╗
-║ Scan Status Update                                 ║
-╠════════════════════════════════════════════════════╣
-║ Progress: ${((endHeight / currentHeight) * 100).toFixed(
-              2
-            )}%                              ║
-║ Current Block: ${endHeight.toLocaleString()}                        ║
-║ Time Remaining: ${this.formatTime(estimatedTimeRemaining)}               ║
-║ Transactions Found: ${Array.from(transactionsByAddress.values())
-              .reduce((acc, set) => acc + set.size, 0)
-              .toLocaleString()}                    ║
-╚════════════════════════════════════════════════════╝
-`);
           }
         } catch (error) {
-          console.error(
-            `Error processing block range ${height}-${endHeight}:`,
-            error.message
-          );
-
+          console.error(`\nError processing block ${height}:`, error.message);
           // Save progress before retrying
-          try {
-            if (this.dbStatus.isOpen) {
-              await db.put("scan_progress", {
-                lastBlock: height - 1,
-                transactions: Object.fromEntries(
-                  Array.from(transactionsByAddress.entries()).map(
-                    ([addr, txs]) => [addr, Array.from(txs)]
-                  )
-                ),
-                lastUpdated: Date.now(),
-              });
-            }
-          } catch (saveError) {
-            console.error("Error saving progress:", saveError.message);
+          if (this.dbStatus.isOpen) {
+            await db.put("scan_progress", {
+              lastBlock: height - 1,
+              transactions: Object.fromEntries(
+                Array.from(transactionsByAddress.entries()).map(
+                  ([addr, txs]) => [addr, Array.from(txs)]
+                )
+              ),
+              lastUpdated: Date.now(),
+            });
           }
 
-          // Close and reopen database
-          await this.closeDatabase();
-          await this.openDatabase();
-
-          // Don't show initial messages on retry if we've already started
-          if (!isResume) {
-            isResume = true;
-          }
-
-          continue; // Continue with next batch
+          // Wait a bit before retrying
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          height--; // Retry this block
+          continue;
         }
       }
 
-      // Final cleanup
-      await this.closeDatabase();
-      return this.formatResults(addresses, transactionsByAddress);
+      return Object.fromEntries(
+        Array.from(transactionsByAddress.entries()).map(([addr, txs]) => [
+          addr,
+          Array.from(txs),
+        ])
+      );
     } catch (error) {
-      await this.closeDatabase();
+      console.error("Error in getAddressTransactions:", error);
       throw error;
     }
   }
 
-  // Add this new method to handle block range processing
-  async processBlockRange(
-    startHeight,
-    endHeight,
-    addresses,
-    transactionsByAddress
-  ) {
-    // Initialize worker pool if needed
-    if (this.workerPool.workers.length === 0) {
-      await this.initWorkerPool();
-    }
-
-    const totalBlocks = endHeight - startHeight;
-    let processedBlocks = 0;
-
-    for (let h = startHeight; h < endHeight; h += this.workerPool.size) {
-      const chunkEnd = Math.min(h + this.workerPool.size, endHeight);
-
-      processedBlocks += chunkEnd - h;
-      const batchProgress = ((processedBlocks / totalBlocks) * 100).toFixed(2);
-      const overallProgress = ((chunkEnd / this.totalBlocks) * 100).toFixed(2);
-
-      // Use process.stdout.write to update in place
-      process.stdout.write(
-        this.formatProgressTable(
-          chunkEnd,
-          this.totalBlocks,
-          overallProgress,
-          batchProgress
-        ) + "\n"
+  async processBlockTransactions(block, addresses, transactionsByAddress) {
+    for (const tx of block.tx) {
+      const outputAddresses = tx.vout.flatMap(
+        (vout) => vout.scriptPubKey.addresses || []
+      );
+      const inputAddresses = tx.vin.flatMap(
+        (vin) => vin.prevout?.scriptPubKey?.addresses || []
       );
 
-      try {
-        // Get block hashes with increased timeout
-        const blockHashes = await withBackoff(async () => {
-          const client = axios.create({
-            ...this.client.defaults,
-            timeout: this.config.blockTimeout,
-          });
-          return this.getBlockHashes(h, chunkEnd, client);
-        }, 5); // Increase retries to 5
+      const involvedAddresses = new Set([
+        ...outputAddresses,
+        ...inputAddresses,
+      ]);
 
-        // Process blocks in smaller chunks with better error handling
-        const blocks = await Promise.all(
-          blockHashes.map(
-            (hash) =>
-              withBackoff(async () => {
-                const client = axios.create({
-                  ...this.client.defaults,
-                  timeout: this.config.blockTimeout,
-                });
-                const block = await this.call("getblock", [hash, 2], client);
-                if (!block)
-                  throw new Error(`Failed to get block for hash ${hash}`);
-                return block;
-              }, 5) // Increase retries to 5
-          )
-        );
-
-        // Process valid blocks
-        const validBlocks = blocks.filter(Boolean);
-        for (const block of validBlocks) {
-          try {
-            await this.processBlockTransactions(
-              block,
-              addresses,
-              transactionsByAddress
-            );
-          } catch (error) {
-            console.error(
-              `Error processing block ${block.height}:`,
-              error.message
-            );
-            // Continue with next block instead of failing completely
-            continue;
-          }
+      // Check if any of our target addresses are involved
+      for (const addr of addresses) {
+        if (involvedAddresses.has(addr)) {
+          transactionsByAddress.get(addr).add(this.formatTransaction(tx));
+          await this.updateAddressIndex(addr, block.height);
         }
-      } catch (error) {
-        console.error(`Error in block range ${h}-${chunkEnd}:`, error.message);
-        // Throw to trigger retry at higher level
-        throw error;
       }
     }
   }
@@ -608,45 +522,6 @@ ${error.message}
       this.addressIndex.set(address, new Set());
     }
     this.addressIndex.get(address).add(blockHeight);
-  }
-
-  // Add this method to the BitcoinRPC class
-  async processBlockTransactions(block, addresses, transactionsByAddress) {
-    for (const tx of block.tx) {
-      const outputAddresses = tx.vout.flatMap(
-        (vout) => vout.scriptPubKey.addresses || []
-      );
-      const inputAddresses = tx.vin.flatMap(
-        (vin) => vin.prevout?.scriptPubKey?.addresses || []
-      );
-
-      const involvedAddresses = new Set([
-        ...outputAddresses,
-        ...inputAddresses,
-      ]);
-
-      // Check if any of our target addresses are involved
-      let isRelevant = false;
-      for (const addr of addresses) {
-        if (involvedAddresses.has(addr)) {
-          isRelevant = true;
-          transactionsByAddress.get(addr).add(this.formatTransaction(tx));
-
-          // Update address index
-          await this.updateAddressIndex(addr, block.height);
-        }
-      }
-
-      // If transaction is relevant, cache it
-      if (isRelevant && !this.txCache.has(tx.txid)) {
-        if (this.txCache.size >= this.TX_CACHE_SIZE) {
-          // Remove oldest entry
-          const firstKey = this.txCache.keys().next().value;
-          this.txCache.delete(firstKey);
-        }
-        this.txCache.set(tx.txid, this.formatTransaction(tx));
-      }
-    }
   }
 
   // Add database management methods
