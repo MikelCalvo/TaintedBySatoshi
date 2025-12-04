@@ -42,7 +42,7 @@ A web application that allows you to check if a Bitcoin address has any connecti
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/TaintedBySatoshi.git
+git clone https://github.com/MikelCalvo/TaintedBySatoshi.git
 cd TaintedBySatoshi
 ```
 

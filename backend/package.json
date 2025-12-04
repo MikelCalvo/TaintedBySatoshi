@@ -10,14 +10,14 @@
     "check-node": "node src/scripts/checkNodeStatus.js"
   },
   "dependencies": {
-    "axios": "^1.7.9",
+    "axios": "^1.13.2",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.7",
-    "express": "^4.21.2",
-    "bitcoinjs-lib": "^6.1.7",
-    "level": "^9.0.0"
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "bitcoinjs-lib": "^7.0.0",
+    "level": "^10.0.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.9"
+    "nodemon": "^3.1.11"
   }
 }
