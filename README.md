@@ -108,47 +108,70 @@ NEXT_PUBLIC_API_URL=http://localhost:3001
 bitcoind -server -rpcuser=your_username -rpcpassword=your_password -txindex=1
 ```
 
-2. Check your Bitcoin node status:
-
-```bash
-cd backend
-npm run check-node
-```
-
-This will show:
-
-- Node connection status and version
-- Sync progress and estimated time remaining
-- Mempool status and size
-- Transaction indexing status
-
-Make sure your node is fully synced and has txindex enabled before proceeding.
-
-3. Start the backend server:
+2. Start the backend server:
 
 ```bash
 cd backend
 npm run dev
 ```
 
-4. Start the frontend development server:
+3. Start the frontend development server:
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-5. Initialize the Satoshi transaction database:
+4. Initialize the Satoshi transaction database:
 
 ```bash
 cd backend
 npm run update-satoshi-data
 ```
 
+**Note:** The `update-satoshi-data` script automatically handles everything:
+- Extracts Patoshi addresses from 21,953 verified blocks if not already done (~25-30 minutes first time)
+- Includes Genesis block and early Satoshi addresses (blocks 0-2)
+- Scans the entire blockchain for tainted transactions
+- Updates the database with all connections
+
 The application will be available at:
 
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:3001
+
+## 🔬 Patoshi Pattern Analysis
+
+This project uses **verified Patoshi blocks** to identify addresses belonging to Satoshi Nakamoto.
+
+### What is Patoshi?
+
+"Patoshi" refers to a unique mining pattern discovered by **Sergio Demian Lerner** in 2013 that identifies blocks mined by Satoshi Nakamoto with high confidence.
+
+**Key Identifying Patterns:**
+
+1. **Nonce LSB Pattern**: The last byte of the nonce is ALWAYS in ranges 0-9 or 19-58 (not 10-18 or 59-255 like other miners)
+2. **ExtraNonce Increment**: Increments ~5x faster than normal (only scans 1/5 of nonce space)
+3. **No Timestamp Reversals**: Satoshi's blocks never have backwards timestamps
+
+**Dataset Used:**
+
+- **21,953 verified Patoshi blocks** (blocks 3-49,973)
+- **Plus early Satoshi blocks** (blocks 0-2): Genesis block and first mined blocks
+- Curated by Sergio Demian Lerner & Jameson Lopp
+- Source: https://github.com/bensig/patoshi-addresses
+- Research: https://bitslog.com/2013/04/17/the-well-deserved-fortune-of-satoshi-nakamoto/
+
+**Address Extraction Process:**
+
+The application automatically extracts coinbase addresses when you run `npm run update-satoshi-data`:
+
+- Iterates through all 21,953 verified Patoshi block heights
+- Includes Genesis block (1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa) and blocks 1-2
+- Extracts coinbase addresses (mining rewards) from each block
+- Generates `backend/data/satoshiAddresses.js` with ~21,956 addresses
+- Takes approximately 25-30 minutes on first run
+- Subsequent runs skip extraction if addresses are already present
 
 ## 📝 Updating Transaction Data
 
@@ -158,21 +181,29 @@ The application maintains a database of transactions connected to Satoshi's addr
 
 #### Backend Scripts
 
-| Script                        | Description                              | Command                                                                       |
-| ----------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------- |
-| `npm start`                   | Start the production server              | `node src/index.js`                                                           |
-| `npm run dev`                 | Start development server with hot reload | `nodemon src/index.js`                                                        |
-| `npm run update-satoshi-data` | Update Satoshi transaction database      | `node --expose-gc --max-old-space-size=8192 src/scripts/updateSatoshiData.js` |
-| `npm run check-node`          | Check Bitcoin node status                | `node src/scripts/checkNodeStatus.js`                                         |
+| Script                        | Description                                                     |
+| ----------------------------- | --------------------------------------------------------------- |
+| `npm start`                   | Start the production server                                     |
+| `npm run dev`                 | Start development server with hot reload                        |
+| `npm run check-node`          | Check Bitcoin node RPC status                                   |
+| `npm run update-satoshi-data` | **Extract addresses & scan blockchain** (fully automated)       |
+| `npm run check-satoshi-data`  | View taint database statistics                                  |
 
-The `update-satoshi-data` script includes:
+The `update-satoshi-data` script is fully automated and includes:
 
-- Automatic garbage collection with `--expose-gc`
-- 8GB heap allocation with `--max-old-space-size=8192`
-- Transaction batch processing
-- Progress monitoring with visual feedback
-- Automatic retry mechanism
-- Memory usage optimization
+- **Automatic address extraction** (if not already done)
+  - Extracts ~21,956 addresses from Genesis block + 21,953 Patoshi blocks
+  - Takes 25-30 minutes on first run, skipped on subsequent runs
+- **Blockchain scanning**
+  - Scans entire blockchain for tainted transactions
+  - Tracks Bitcoin flow from Satoshi addresses to all connected addresses
+- **Performance optimizations**
+  - Automatic garbage collection with `--expose-gc`
+  - 8GB heap allocation with `--max-old-space-size=8192`
+  - Transaction batch processing
+  - Progress monitoring with visual feedback
+  - Automatic retry mechanism with exponential backoff
+  - Memory usage monitoring
 
 #### Frontend Scripts
 
@@ -199,23 +230,28 @@ cd frontend
 npm run dev
 ```
 
-3. Initialize or update the Satoshi transaction database:
+3. Initialize or update the Satoshi transaction database (fully automated):
 
 ```bash
 cd backend
 npm run update-satoshi-data
 ```
 
-4. To check your Bitcoin node status:
+This command automatically:
+- Extracts Patoshi addresses (first time only, ~25-30 min)
+- Scans the blockchain for all tainted transactions
+- Updates the database with new connections
+
+4. Check taint database statistics:
 
 ```bash
 cd backend
-npm run check-node
+npm run check-satoshi-data
 ```
 
 The application will be available at:
 
-- Frontend: http://localhost:1337 (default)
+- Frontend: http://localhost:3000 (default)
 - Backend API: http://localhost:3001 (default)
 
 ## 📝 API Endpoints
@@ -287,20 +323,32 @@ The application uses advanced memory management techniques:
 - Batch processing
 - Memory usage monitoring
 
-### Available Scripts
+### Main Script: `npm run update-satoshi-data`
 
-#### `npm run update-satoshi-data`
-
-Updates the local database with optimized settings:
+This is the primary command for initializing and updating the database. It's fully automated:
 
 ```bash
 node --expose-gc --max-old-space-size=8192 src/scripts/updateSatoshiData.js
 ```
 
-This script includes:
+**What it does automatically:**
 
-- Automatic garbage collection
-- 8GB heap size allocation
+1. **Address Extraction** (first run only, ~25-30 minutes)
+   - Extracts addresses from Genesis block (block 0)
+   - Extracts addresses from early Satoshi blocks (1-2)
+   - Extracts addresses from 21,953 verified Patoshi blocks (3-49,973)
+   - Generates `data/satoshiAddresses.js` with ~21,956 addresses
+
+2. **Blockchain Scanning** (several hours depending on system)
+   - Scans entire blockchain chronologically
+   - Identifies all addresses that received Bitcoin from Satoshi
+   - Tracks multi-hop connections (taint propagation)
+   - Stores transaction paths in LevelDB
+
+**Performance optimizations:**
+
+- Automatic garbage collection with `--expose-gc`
+- 8GB heap size allocation with `--max-old-space-size=8192`
 - Transaction caching
 - Parallel block processing
 - Memory usage monitoring

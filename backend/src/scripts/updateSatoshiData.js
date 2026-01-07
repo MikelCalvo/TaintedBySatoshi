@@ -7,7 +7,6 @@ const {
   workerData,
 } = require("worker_threads");
 const path = require("path");
-const { SATOSHI_ADDRESSES } = require("../services/bitcoinService");
 const bitcoinRPC = require("../services/bitcoinRPC");
 const fs = require("fs");
 
@@ -90,190 +89,82 @@ async function timeoutPromise(
   }
 }
 
-async function processAddress(address, currentDegree, db) {
-  if (!db) {
-    db = new Level(DB_PATH, { valueEncoding: "json" });
-  }
-
+async function processAddress(
+  address,
+  currentDegree,
+  db,
+  transaction,
+  sourceAddress = null
+) {
   try {
-    const transactions = await bitcoinRPC.getAddressTransactions(address);
+    const tx = transaction;
 
-    for (const tx of transactions) {
-      const isOutgoing = tx.inputs.some(
-        (input) => input.prev_out.addr === address
-      );
+    // Check if we already have a shorter path for this address
+    try {
+      const existing = await db.get(`tainted:${address}`);
+      if (existing.degree <= currentDegree) {
+        return; // Skip if we already have a shorter or equal path
+      }
+    } catch (err) {
+      // Address not yet tainted, proceed
+    }
 
-      if (isOutgoing) {
-        // Store the transaction
-        await db.put(`tx:${tx.hash}`, {
-          hash: tx.hash,
-          time: tx.time,
-          inputs: tx.inputs,
-          outputs: tx.out,
-          fromAddress: address,
-          degree: currentDegree,
-        });
+    let path = [];
+    let originalSatoshiAddress = address;
 
-        // Process each output address in parallel
-        const outputPromises = tx.out
-          .filter(
-            (output) =>
-              output.addr !== address &&
-              !SATOSHI_ADDRESSES.includes(output.addr)
-          )
-          .map(async (output) => {
-            try {
-              // Validate output amount
-              if (!output.value || output.value <= 0) {
-                console.warn(`Invalid amount in transaction ${tx.hash} output`);
-                return null;
-              }
+    if (sourceAddress) {
+      try {
+        const parentTinting = await db.get(`tainted:${sourceAddress}`);
+        originalSatoshiAddress = parentTinting.originalSatoshiAddress;
 
-              // Check if we already have a shorter path
-              try {
-                const existing = await db.get(`tainted:${output.addr}`);
-                if (existing.degree <= currentDegree) {
-                  return null; // Skip if we already have a shorter or equal path
-                }
-              } catch (err) {
-                // Address not yet tainted, proceed with new path
-              }
+        // Find the specific output amount for this address in the transaction
+        const output = tx.out.find((o) => o.addr === address);
+        const amount = output ? output.value : 0;
 
-              const parentTinting = await db.get(`tainted:${address}`);
-              const path = [
-                ...parentTinting.path,
-                {
-                  from: address,
-                  to: output.addr,
-                  txHash: tx.hash,
-                  amount: output.value,
-                },
-              ];
-
-              // Store tinting information
-              await db.put(`tainted:${output.addr}`, {
-                txHash: tx.hash,
-                originalSatoshiAddress: parentTinting.originalSatoshiAddress,
-                amount: output.value,
-                degree: currentDegree,
-                path,
-                lastUpdated: Date.now(),
-              });
-
-              return {
-                address: output.addr,
-                degree: currentDegree + 1,
-              };
-            } catch (err) {
-              console.error(
-                `Error processing output address ${output.addr}:`,
-                err
-              );
-              return null;
-            }
-          });
-
-        const results = await Promise.all(outputPromises);
-        const nextAddresses = results.filter(Boolean);
-
-        // Queue next degree addresses
-        for (const { address: nextAddr, degree } of nextAddresses) {
-          await db.put(`queue:${degree}:${nextAddr}`, {
-            address: nextAddr,
-            processed: false,
-            queuedAt: Date.now(),
-          });
-        }
+        path = [
+          ...parentTinting.path,
+          {
+            from: sourceAddress,
+            to: address,
+            txHash: tx.hash,
+            amount: amount,
+          },
+        ];
+      } catch (err) {
+        // Parent not found (shouldn't happen with chronological scan)
+      }
+    } else {
+      // It's a Satoshi address (degree 0 or 1)
+      if (SATOSHI_ADDRESSES.includes(address)) {
+        originalSatoshiAddress = address;
       }
     }
+
+    // Store the transaction if not already stored
+    try {
+      await db.get(`tx:${tx.hash}`);
+    } catch (err) {
+      await db.put(`tx:${tx.hash}`, {
+        hash: tx.hash,
+        time: tx.time,
+        inputs: tx.inputs,
+        outputs: tx.out,
+        degree: currentDegree,
+      });
+    }
+
+    // Store tinting information
+    await db.put(`tainted:${address}`, {
+      txHash: tx.hash,
+      originalSatoshiAddress,
+      amount: tx.out.find((o) => o.addr === address)?.value || 0,
+      degree: currentDegree,
+      path,
+      lastUpdated: Date.now(),
+    });
   } catch (error) {
     console.error(`Error processing address ${address}:`, error);
-    throw error;
   }
-}
-
-async function spawnWorker(address, currentDegree) {
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(__filename, {
-      workerData: { address, currentDegree },
-    });
-
-    // Add timeout to kill hanging workers
-    const workerTimeout = setTimeout(() => {
-      console.error(`Worker for address ${address} timed out, terminating...`);
-      worker.terminate();
-      reject(new Error(`Worker timed out processing address ${address}`));
-    }, FETCH_TIMEOUT);
-
-    worker.on("message", (result) => {
-      clearTimeout(workerTimeout);
-      resolve(result);
-    });
-
-    worker.on("error", (error) => {
-      clearTimeout(workerTimeout);
-      reject(error);
-    });
-
-    worker.on("exit", (code) => {
-      clearTimeout(workerTimeout);
-      if (code !== 0) {
-        reject(new Error(`Worker stopped with exit code ${code}`));
-      }
-    });
-  });
-}
-
-async function processBatch(addresses, currentDegree) {
-  const results = [];
-  const failedAddresses = [];
-
-  for (const address of addresses) {
-    try {
-      const result = await timeoutPromise(
-        () => spawnWorker(address, currentDegree),
-        FETCH_TIMEOUT,
-        RETRY_ATTEMPTS
-      );
-
-      if (result.success) {
-        results.push(result.result);
-      } else {
-        console.error(`Failed to process address ${address}: ${result.error}`);
-        failedAddresses.push(address);
-      }
-    } catch (error) {
-      console.error(`Failed to process address ${address}: ${error.message}`);
-      failedAddresses.push(address);
-    }
-  }
-
-  // If there are failed addresses, retry them once more with increased timeout
-  if (failedAddresses.length > 0) {
-    console.log(
-      `Retrying ${failedAddresses.length} failed addresses with increased timeout...`
-    );
-
-    for (const address of failedAddresses) {
-      try {
-        const result = await timeoutPromise(
-          () => spawnWorker(address, currentDegree),
-          FETCH_TIMEOUT * 2, // Double the timeout for retries
-          2 // Fewer retry attempts for already-failed addresses
-        );
-
-        if (result.success) {
-          results.push(result.result);
-        }
-      } catch (error) {
-        console.error(
-          `Permanently failed to process address ${address}: ${error.message}`
-        );
-      }
-    }
-  }
-
-  return results;
 }
 
 // Add these helper functions at the top level
@@ -307,6 +198,52 @@ async function updateSatoshiTransactions() {
 
   try {
     console.log("Starting Satoshi transactions update...");
+
+    // Load Satoshi addresses
+    const satoshiAddressesPath = path.join(__dirname, "../../data/satoshiAddresses.js");
+    let SATOSHI_ADDRESSES = [];
+    let ADDRESS_METADATA = {};
+
+    // Check if addresses file exists
+    if (!fs.existsSync(satoshiAddressesPath)) {
+      console.log(
+        "\n⚠️  Patoshi addresses not found."
+      );
+      console.log(
+        "📥 Extracting Patoshi addresses automatically (this may take 25-30 minutes)...\n"
+      );
+
+      const { extractPatoshiAddresses } = require("./extractPatoshiAddresses");
+      const result = await extractPatoshiAddresses();
+
+      console.log(`\n✅ Extracted ${result.count} addresses`);
+      console.log(`✓ Continuing with blockchain scan...\n`);
+
+      // Clear require cache so we can load the new file
+      delete require.cache[require.resolve(satoshiAddressesPath)];
+    }
+
+    // Load the addresses (either existing or just created)
+    const satoshiData = require(satoshiAddressesPath);
+    SATOSHI_ADDRESSES = satoshiData.SATOSHI_ADDRESSES || [];
+    ADDRESS_METADATA = satoshiData.ADDRESS_METADATA || {};
+
+    // Verify we have addresses
+    if (SATOSHI_ADDRESSES.length === 0) {
+      console.error("\n❌ ERROR: satoshiAddresses.js exists but contains no addresses!");
+      console.log("   Please run: npm run extract-patoshi-addresses\n");
+      process.exit(1);
+    }
+
+    console.log(
+      `Using ${SATOSHI_ADDRESSES.length.toLocaleString()} Patoshi addresses`
+    );
+    console.log(`📚 Source: https://github.com/bensig/patoshi-addresses`);
+    console.log(`   Patoshi Pattern Analysis by Sergio Demian Lerner`);
+    console.log(
+      `   https://bitslog.com/2013/04/17/the-well-deserved-fortune-of-satoshi-nakamoto/\n`
+    );
+
     await bitcoinRPC.initialize();
 
     // Get initial blockchain info
@@ -327,91 +264,29 @@ async function updateSatoshiTransactions() {
       });
     }
 
-    // First degree: Direct transactions from Satoshi
-    for (let i = 0; i < SATOSHI_ADDRESSES.length; i += BATCH_SIZE) {
-      const batch = SATOSHI_ADDRESSES.slice(i, i + BATCH_SIZE);
-
-      try {
-        const transactionsByAddress = await timeoutPromise(
-          () =>
-            bitcoinRPC.getAddressTransactions(batch, (currentBlock) => {
-              const overallProgress = (currentBlock / totalBlocks) * 100;
-              updateProgress(currentBlock, totalBlocks, overallProgress);
-            }),
-          BLOCK_FETCH_TIMEOUT,
-          5
-        );
-
-        for (const [address, transactions] of Object.entries(
-          transactionsByAddress
-        )) {
-          if (!transactions || transactions.length === 0) continue;
-
-          const currentBlock = transactions[0].block_height || 0;
-          const overallProgress = (currentBlock / totalBlocks) * 100;
-
-          updateProgress(currentBlock, totalBlocks, overallProgress);
-
-          // Process transactions...
-          await processAddress(address, currentDegree, db);
-        }
-      } catch (error) {
-        console.error("\nFailed to process batch:", error.message);
-        if (error.message.includes("timeout")) {
-          console.log("Attempting to resume from last saved progress...");
-          continue;
-        }
-        throw error;
-      }
-    }
-
-    // Process subsequent degrees using worker threads
-    currentDegree = 2;
-    let hasMore = true;
-
-    while (hasMore && currentDegree <= MAX_DEGREE) {
-      console.log(`Processing degree ${currentDegree} connections...`);
-      hasMore = false;
-
-      // Get all addresses for current degree
-      const addresses = [];
-      const iterator = db.iterator({
-        gt: `queue:${currentDegree}:`,
-        lt: `queue:${currentDegree}:\xff`,
-      });
-
-      for await (const [key, value] of iterator) {
-        if (!value.processed) {
-          hasMore = true;
-          addresses.push(value.address);
-        }
-      }
-
-      if (addresses.length > 0) {
-        // Process addresses in batches using worker threads
-        for (let i = 0; i < addresses.length; i += BATCH_SIZE) {
-          const batch = addresses.slice(i, i + BATCH_SIZE);
-          await processBatch(batch, currentDegree);
-
-          // Mark addresses as processed
-          for (const address of batch) {
-            await db.put(`queue:${currentDegree}:${address}`, {
+    // Single pass chronological scan
+    console.log("Starting single-pass chronological scan...");
+    await timeoutPromise(
+      () =>
+        bitcoinRPC.getAddressTransactions(
+          SATOSHI_ADDRESSES,
+          (currentBlock) => {
+            const overallProgress = (currentBlock / totalBlocks) * 100;
+            updateProgress(currentBlock, totalBlocks, overallProgress);
+          },
+          async (address, transaction, degree, sourceAddress) => {
+            await processAddress(
               address,
-              processed: true,
-              processedAt: Date.now(),
-            });
+              degree,
+              db,
+              transaction,
+              sourceAddress
+            );
           }
-        }
-      }
-
-      if (hasMore) {
-        currentDegree++;
-      }
-    }
-
-    if (currentDegree > MAX_DEGREE) {
-      console.log(`Reached maximum degree limit (${MAX_DEGREE})`);
-    }
+        ),
+      BLOCK_FETCH_TIMEOUT * 10, // Very long timeout for the whole scan
+      1
+    );
 
     console.log("Successfully updated Satoshi transactions database");
   } catch (error) {
