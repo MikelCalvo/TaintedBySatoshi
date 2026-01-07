@@ -383,6 +383,9 @@ ${error.message}
     onTransactionFound,
     db
   ) {
+    const batch = db.batch();
+    const callbackPromises = [];
+
     for (const tx of block.tx) {
       const txid = tx.txid || tx.hash;
       let isTaintSpreading = false;
@@ -445,8 +448,8 @@ ${error.message}
             // Try to get address from this output
             const address = this.getAddressFromScript(vout.scriptPubKey);
 
-            // Persist tainted output (even if no address)
-            await db.put(`tainted_out:${outpoint}`, {
+            // Add to batch instead of immediate put
+            batch.put(`tainted_out:${outpoint}`, {
               address: address || null,
               degree: currentDegree,
               txHash: txid,
@@ -454,16 +457,28 @@ ${error.message}
 
             // Only trigger callback if we have an address
             if (address && onTransactionFound) {
-              await onTransactionFound(
-                address,
-                formattedTx,
-                currentDegree,
-                sourceAddress
+              callbackPromises.push(
+                onTransactionFound(
+                  address,
+                  formattedTx,
+                  currentDegree,
+                  sourceAddress
+                )
               );
             }
           }
         }
       }
+    }
+
+    // Write all tainted outputs in one batch operation
+    if (batch.length > 0) {
+      await batch.write();
+    }
+
+    // Execute all callbacks in parallel
+    if (callbackPromises.length > 0) {
+      await Promise.all(callbackPromises);
     }
   }
 

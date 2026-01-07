@@ -19,6 +19,15 @@ const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY = 30000; // 30 seconds
 const PROGRESS_TABLE_LINES = 6;
 
+// Load Satoshi addresses if available (needed by processAddress)
+let SATOSHI_ADDRESSES = [];
+try {
+  const satoshiData = require("../../data/satoshiAddresses");
+  SATOSHI_ADDRESSES = satoshiData.SATOSHI_ADDRESSES || [];
+} catch (err) {
+  // File doesn't exist yet - will be loaded later in updateSatoshiTransactions
+}
+
 // Ensure the database directory exists
 const dataDir = path.join(
   process.env.DB_PATH || path.join(__dirname, "../../data")
@@ -89,6 +98,9 @@ async function timeoutPromise(
   }
 }
 
+// Cache for parent taintings to avoid repeated DB reads
+const parentTaintingCache = new Map();
+
 async function processAddress(
   address,
   currentDegree,
@@ -113,8 +125,23 @@ async function processAddress(
     let originalSatoshiAddress = address;
 
     if (sourceAddress) {
-      try {
-        const parentTinting = await db.get(`tainted:${sourceAddress}`);
+      // Try cache first, then DB
+      let parentTinting = parentTaintingCache.get(sourceAddress);
+      if (!parentTinting) {
+        try {
+          parentTinting = await db.get(`tainted:${sourceAddress}`);
+          // Cache it for future use (limit cache size)
+          if (parentTaintingCache.size > 10000) {
+            const firstKey = parentTaintingCache.keys().next().value;
+            parentTaintingCache.delete(firstKey);
+          }
+          parentTaintingCache.set(sourceAddress, parentTinting);
+        } catch (err) {
+          // Parent not found (shouldn't happen with chronological scan)
+        }
+      }
+
+      if (parentTinting) {
         originalSatoshiAddress = parentTinting.originalSatoshiAddress;
 
         // Find the specific output amount for this address in the transaction
@@ -130,21 +157,20 @@ async function processAddress(
             amount: amount,
           },
         ];
-      } catch (err) {
-        // Parent not found (shouldn't happen with chronological scan)
       }
     } else {
       // It's a Satoshi address (degree 0 or 1)
-      if (SATOSHI_ADDRESSES.includes(address)) {
+      if (SATOSHI_ADDRESSES && SATOSHI_ADDRESSES.includes(address)) {
         originalSatoshiAddress = address;
       }
     }
 
-    // Store the transaction if not already stored
+    // Store the transaction if not already stored (check cache first)
+    const txKey = `tx:${tx.hash}`;
     try {
-      await db.get(`tx:${tx.hash}`);
+      await db.get(txKey);
     } catch (err) {
-      await db.put(`tx:${tx.hash}`, {
+      await db.put(txKey, {
         hash: tx.hash,
         time: tx.time,
         inputs: tx.inputs,
@@ -154,14 +180,21 @@ async function processAddress(
     }
 
     // Store tinting information
-    await db.put(`tainted:${address}`, {
+    const taintData = {
       txHash: tx.hash,
       originalSatoshiAddress,
       amount: tx.out.find((o) => o.addr === address)?.value || 0,
       degree: currentDegree,
       path,
       lastUpdated: Date.now(),
-    });
+    };
+
+    await db.put(`tainted:${address}`, taintData);
+
+    // Update cache
+    if (parentTaintingCache.size <= 10000) {
+      parentTaintingCache.set(address, taintData);
+    }
   } catch (error) {
     console.error(`Error processing address ${address}:`, error);
   }
@@ -199,9 +232,8 @@ async function updateSatoshiTransactions() {
   try {
     console.log("Starting Satoshi transactions update...");
 
-    // Load Satoshi addresses
+    // Load Satoshi addresses (update global variable)
     const satoshiAddressesPath = path.join(__dirname, "../../data/satoshiAddresses.js");
-    let SATOSHI_ADDRESSES = [];
     let ADDRESS_METADATA = {};
 
     // Check if addresses file exists
@@ -250,11 +282,13 @@ async function updateSatoshiTransactions() {
     const { blocks: totalBlocks } = await bitcoinRPC.getBlockchainInfo();
 
     db = new Level(DB_PATH, { valueEncoding: "json" });
+    await db.open();
     console.log("Database connection established");
 
     // Initialize taint data for Satoshi addresses
+    const taintedBatch = db.batch();
     for (const address of SATOSHI_ADDRESSES) {
-      await db.put(`tainted:${address}`, {
+      taintedBatch.put(`tainted:${address}`, {
         txHash: null,
         originalSatoshiAddress: address,
         amount: 0, // Will be updated when processing transactions
@@ -263,6 +297,78 @@ async function updateSatoshiTransactions() {
         lastUpdated: Date.now(),
       });
     }
+    await taintedBatch.write();
+    console.log(`Initialized ${SATOSHI_ADDRESSES.length} Satoshi addresses in main DB`);
+
+    // Initialize Satoshi coinbase outputs as tainted in scan progress DB
+    console.log("\n🔍 Initializing Satoshi coinbase outputs as tainted...");
+    const scanDb = new Level(path.join(DB_PATH, "scan_progress"), {
+      valueEncoding: "json",
+      createIfMissing: true
+    });
+    await scanDb.open();
+
+    // Check if already initialized
+    let needsInit = false;
+    try {
+      await scanDb.get("satoshi_coinbase_initialized");
+      console.log("✓ Satoshi coinbase outputs already initialized");
+    } catch (err) {
+      needsInit = true;
+    }
+
+    if (needsInit) {
+      console.log("Scanning Patoshi blocks to extract coinbase outputs...");
+      const { PATOSHI_BLOCKS } = require("../data/patoshiBlocks");
+      const coinbaseBatch = scanDb.batch();
+      let initCount = 0;
+
+      // Add genesis and early blocks
+      const EARLY_BLOCKS = [0, 1, 2];
+      const allBlocks = [...EARLY_BLOCKS, ...PATOSHI_BLOCKS];
+
+      for (let i = 0; i < allBlocks.length; i++) {
+        const height = allBlocks[i];
+
+        if (i % 1000 === 0) {
+          console.log(`  Progress: ${i}/${allBlocks.length} (${((i/allBlocks.length)*100).toFixed(1)}%)`);
+        }
+
+        try {
+          const hash = await bitcoinRPC.call("getblockhash", [height]);
+          const block = await bitcoinRPC.call("getblock", [hash, 2]);
+          const coinbaseTx = block.tx[0];
+
+          // Mark each coinbase output as tainted
+          for (let voutIndex = 0; voutIndex < coinbaseTx.vout.length; voutIndex++) {
+            const vout = coinbaseTx.vout[voutIndex];
+            const address = bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
+            const outpoint = `${coinbaseTx.txid}:${voutIndex}`;
+
+            coinbaseBatch.put(`tainted_out:${outpoint}`, {
+              address: address || null,
+              degree: 0,
+              txHash: coinbaseTx.txid,
+              blockHeight: height,
+            });
+            initCount++;
+          }
+        } catch (error) {
+          console.error(`Error processing block ${height}:`, error.message);
+        }
+      }
+
+      await coinbaseBatch.write();
+      await scanDb.put("satoshi_coinbase_initialized", {
+        initialized: true,
+        timestamp: Date.now(),
+        count: initCount,
+      });
+
+      console.log(`✓ Initialized ${initCount} Satoshi coinbase outputs as tainted\n`);
+    }
+
+    await scanDb.close();
 
     // Single pass chronological scan
     console.log("Starting single-pass chronological scan...");
