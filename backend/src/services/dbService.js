@@ -5,8 +5,9 @@ class DatabaseService {
   constructor() {
     this.db = null;
     // Use environment variable for DB path or fall back to default
-    const dbDir = process.env.DB_PATH || path.join(__dirname, "../../data");
-    this.dbPath = path.join(dbDir, "satoshi-transactions");
+    // Note: DB_PATH should point directly to the database directory (e.g., ./data)
+    // The updateSatoshiData.js script stores data directly in DB_PATH
+    this.dbPath = process.env.DB_PATH || path.join(__dirname, "../../data");
   }
 
   async init() {
