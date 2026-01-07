@@ -7,7 +7,8 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "check-node": "node src/scripts/checkNodeStatus.js",
-    "update-satoshi-data": "node --expose-gc --max-old-space-size=8192 src/scripts/updateSatoshiData.js"
+    "update-satoshi-data": "node --expose-gc --max-old-space-size=8192 src/scripts/updateSatoshiData.js",
+    "check-satoshi-data": "node src/scripts/checkSatoshiData.js"
   },
   "dependencies": {
     "axios": "^1.13.2",
