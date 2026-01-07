@@ -11,12 +11,17 @@ import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 import Slide from "@mui/material/Slide";
 import CheckIcon from "@mui/icons-material/Check";
+import Tabs from "@mui/material/Tabs";
+import Tab from "@mui/material/Tab";
+import FlashOnIcon from "@mui/icons-material/FlashOn";
 
 export function Footer() {
   const [showQR, setShowQR] = useState(false);
+  const [tabValue, setTabValue] = useState(0);
   const [copyTooltip, setCopyTooltip] = useState("Copy to clipboard");
   const [showAlert, setShowAlert] = useState(false);
   const donationAddress = process.env.NEXT_PUBLIC_DONATION_ADDRESS;
+  const lightningAddress = process.env.NEXT_PUBLIC_LIGHTNING_ADDRESS;
   const repositoryUrl = process.env.NEXT_PUBLIC_REPOSITORY_URL;
 
   const handleDonateClick = useCallback((e) => {
@@ -29,9 +34,15 @@ export function Footer() {
     setCopyTooltip("Copy to clipboard");
   }, []);
 
+  const handleTabChange = useCallback((event, newValue) => {
+    setTabValue(newValue);
+    setCopyTooltip("Copy to clipboard");
+  }, []);
+
   const handleCopyClick = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(donationAddress);
+      const addressToCopy = tabValue === 0 ? donationAddress : lightningAddress;
+      await navigator.clipboard.writeText(addressToCopy);
       setShowAlert(true);
       setTimeout(() => {
         setShowAlert(false);
@@ -40,7 +51,7 @@ export function Footer() {
       console.error("Failed to copy:", err);
       setCopyTooltip("Failed to copy");
     }
-  }, [donationAddress]);
+  }, [donationAddress, lightningAddress, tabValue]);
 
   return (
     <>
@@ -111,11 +122,11 @@ export function Footer() {
               </Link>
             </>
           )}
-          {donationAddress && (
+          {(donationAddress || lightningAddress) && (
             <>
               {" • "}
               <Link
-                href={`bitcoin:${donationAddress}`}
+                href="#"
                 color="primary"
                 underline="none"
                 onClick={handleDonateClick}
@@ -158,64 +169,173 @@ export function Footer() {
           }}
         >
           <Typography variant="h6" component="h2" gutterBottom>
-            Bitcoin Donation Address
+            Donation
           </Typography>
-          <Box
-            sx={{
-              bgcolor: "white",
-              p: 2,
-              borderRadius: 1,
-              display: "inline-block",
-              mb: 2,
-            }}
-          >
-            <QRCodeSVG
-              value={`bitcoin:${donationAddress}`}
-              size={256}
-              level="H"
-              includeMargin={true}
-            />
-          </Box>
-          <Box
-            sx={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 1,
-            }}
-          >
-            <Typography
-              variant="body2"
+
+          {donationAddress && lightningAddress && (
+            <Tabs
+              value={tabValue}
+              onChange={handleTabChange}
+              centered
               sx={{
-                wordBreak: "break-all",
-                fontFamily: "monospace",
-                bgcolor: "background.default",
-                p: 2,
-                borderRadius: 1,
-                flex: 1,
+                mb: 3,
+                "& .MuiTab-root": {
+                  color: "text.secondary",
+                  "&.Mui-selected": {
+                    color: "primary.main",
+                  },
+                },
+                "& .MuiTabs-indicator": {
+                  backgroundColor: "primary.main",
+                },
               }}
             >
-              {donationAddress}
+              <Tab
+                icon={<BitcoinIcon />}
+                label="Bitcoin"
+                iconPosition="start"
+              />
+              <Tab
+                icon={<FlashOnIcon />}
+                label="Lightning"
+                iconPosition="start"
+              />
+            </Tabs>
+          )}
+
+          {donationAddress && !lightningAddress && (
+            <Typography variant="subtitle1" gutterBottom sx={{ color: "primary.main", mb: 2 }}>
+              Bitcoin On-Chain
             </Typography>
-            <Tooltip title={copyTooltip}>
-              <IconButton
-                onClick={handleCopyClick}
-                size="small"
+          )}
+
+          {!donationAddress && lightningAddress && (
+            <Typography variant="subtitle1" gutterBottom sx={{ color: "primary.main", mb: 2 }}>
+              Lightning Network
+            </Typography>
+          )}
+
+          {donationAddress && (tabValue === 0 || !lightningAddress) && (
+            <>
+              <Box
                 sx={{
-                  color: "primary.main",
-                  "&:hover": {
-                    color: "primary.light",
-                    "& svg": {
-                      filter: (theme) =>
-                        `drop-shadow(0 0 2px ${theme.palette.primary.main})`,
-                    },
-                  },
+                  bgcolor: "white",
+                  p: 2,
+                  borderRadius: 1,
+                  display: "inline-block",
+                  mb: 2,
                 }}
               >
-                <ContentCopyIcon />
-              </IconButton>
-            </Tooltip>
-          </Box>
+                <QRCodeSVG
+                  value={`bitcoin:${donationAddress}`}
+                  size={256}
+                  level="H"
+                  includeMargin={true}
+                />
+              </Box>
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 1,
+                }}
+              >
+                <Typography
+                  variant="body2"
+                  sx={{
+                    wordBreak: "break-all",
+                    fontFamily: "monospace",
+                    bgcolor: "background.default",
+                    p: 2,
+                    borderRadius: 1,
+                    flex: 1,
+                  }}
+                >
+                  {donationAddress}
+                </Typography>
+                <Tooltip title={copyTooltip}>
+                  <IconButton
+                    onClick={handleCopyClick}
+                    size="small"
+                    sx={{
+                      color: "primary.main",
+                      "&:hover": {
+                        color: "primary.light",
+                        "& svg": {
+                          filter: (theme) =>
+                            `drop-shadow(0 0 2px ${theme.palette.primary.main})`,
+                        },
+                      },
+                    }}
+                  >
+                    <ContentCopyIcon />
+                  </IconButton>
+                </Tooltip>
+              </Box>
+            </>
+          )}
+
+          {lightningAddress && (tabValue === 1 || !donationAddress) && (
+            <>
+              <Box
+                sx={{
+                  bgcolor: "white",
+                  p: 2,
+                  borderRadius: 1,
+                  display: "inline-block",
+                  mb: 2,
+                }}
+              >
+                <QRCodeSVG
+                  value={`lightning:${lightningAddress}`}
+                  size={256}
+                  level="H"
+                  includeMargin={true}
+                />
+              </Box>
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 1,
+                }}
+              >
+                <Typography
+                  variant="body2"
+                  sx={{
+                    wordBreak: "break-all",
+                    fontFamily: "monospace",
+                    bgcolor: "background.default",
+                    p: 2,
+                    borderRadius: 1,
+                    flex: 1,
+                  }}
+                >
+                  {lightningAddress}
+                </Typography>
+                <Tooltip title={copyTooltip}>
+                  <IconButton
+                    onClick={handleCopyClick}
+                    size="small"
+                    sx={{
+                      color: "primary.main",
+                      "&:hover": {
+                        color: "primary.light",
+                        "& svg": {
+                          filter: (theme) =>
+                            `drop-shadow(0 0 2px ${theme.palette.primary.main})`,
+                        },
+                      },
+                    }}
+                  >
+                    <ContentCopyIcon />
+                  </IconButton>
+                </Tooltip>
+              </Box>
+            </>
+          )}
         </Box>
       </Modal>
 
