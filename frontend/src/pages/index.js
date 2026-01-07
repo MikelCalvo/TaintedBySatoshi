@@ -1,6 +1,7 @@
 import Head from "next/head";
 import { Container, Box, Typography } from "@mui/material";
 import AddressSearchForm from "../components/AddressSearchForm";
+import FamousWalletsSuggestions from "../components/FamousWalletsSuggestions";
 
 export default function Home() {
   return (
@@ -25,6 +26,8 @@ export default function Home() {
         </Box>
 
         <AddressSearchForm showNote={true} />
+
+        <FamousWalletsSuggestions />
       </Container>
     </>
   );

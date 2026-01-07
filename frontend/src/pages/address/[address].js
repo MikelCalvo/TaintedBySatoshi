@@ -19,6 +19,7 @@ import {
 import { ArrowBack, ArrowForward } from "@mui/icons-material";
 import AddressSearchForm from "../../components/AddressSearchForm";
 import { useState, useEffect } from "react";
+import FamousWalletsSuggestions from "../../components/FamousWalletsSuggestions";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
@@ -216,7 +217,7 @@ export default function AddressPage({ address, initialLoad }) {
             Checking address connection to Satoshi's wallets...
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            This may take a few moments
+            This may take a moment
           </Typography>
         </Paper>
       </Container>
@@ -362,6 +363,7 @@ export default function AddressPage({ address, initialLoad }) {
                             Try searching for a different address:
                           </Typography>
                           <AddressSearchForm />
+                          <FamousWalletsSuggestions />
                         </Box>
                       </>
                     )}
