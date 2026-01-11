@@ -257,16 +257,13 @@ ${error.message}
         console.log("Starting fresh scan");
       }
 
-      // Load all tainted outpoints into memory for fast lookup
-      const outIterator = db.iterator({
-        gt: "tainted_out:",
-        lt: "tainted_out:\xff",
-      });
-      for await (const [key, value] of outIterator) {
-        const outpoint = key.split(":")[1] + ":" + key.split(":")[2];
-        this.taintedOutpoints.add(outpoint);
-      }
-      console.log(`Loaded ${this.taintedOutpoints.size} tainted outpoints.`);
+      // Don't load outpoints into memory - use DB queries instead
+      // With 16.7M+ outpoints, we've exceeded JavaScript Set maximum size
+      console.log("Using database queries for tainted outpoint lookups (memory-efficient mode)");
+
+      // Clear the Set to save memory - we'll use only DB queries
+      this.taintedOutpoints.clear();
+      this.useDbOnly = true; // Flag to indicate we're using DB-only mode
 
       // Process one block at a time
       for (let height = startBlock; height < currentHeight; height++) {
@@ -385,6 +382,9 @@ ${error.message}
   ) {
     const batch = db.batch();
     const callbackPromises = [];
+    let batchCount = 0;
+    // Track outpoints added in this block to handle intra-block taint propagation
+    const blockTaintedOutpoints = new Map();
 
     for (const tx of block.tx) {
       const txid = tx.txid || tx.hash;
@@ -396,20 +396,28 @@ ${error.message}
       for (const vin of tx.vin) {
         if (vin.coinbase) continue;
         const outpoint = `${vin.txid}:${vin.vout}`;
-        if (this.taintedOutpoints.has(outpoint)) {
+
+        // First check if it was tainted in this block (not yet in DB)
+        if (blockTaintedOutpoints.has(outpoint)) {
+          const outInfo = blockTaintedOutpoints.get(outpoint);
           isTaintSpreading = true;
-          // Try to get degree and address from DB
+          if (outInfo.degree < minDegree) {
+            minDegree = outInfo.degree;
+            sourceAddress = outInfo.address;
+          }
+        } else {
+          // Check DB for tainted outpoint
           try {
             const outInfo = await db.get(`tainted_out:${outpoint}`);
-            if (outInfo.degree < minDegree) {
-              minDegree = outInfo.degree;
-              sourceAddress = outInfo.address; // Use address from input with minimum degree
+            if (outInfo && outInfo.degree !== undefined) {
+              isTaintSpreading = true;
+              if (outInfo.degree < minDegree) {
+                minDegree = outInfo.degree;
+                sourceAddress = outInfo.address; // Use address from input with minimum degree
+              }
             }
           } catch (e) {
-            // If we can't get info from DB, use fallback
-            if (minDegree === Infinity) {
-              minDegree = 1;
-            }
+            // Not tainted, continue
           }
         }
       }
@@ -428,7 +436,7 @@ ${error.message}
       );
       if (goesToSatoshi) {
         isTaintSpreading = true;
-        minDegree = 0;
+        minDegree = -1; // Use -1 so that currentDegree = 0 (seed)
       }
 
       if (isTaintSpreading) {
@@ -441,19 +449,39 @@ ${error.message}
           const vout = tx.vout[index];
           const outpoint = `${txid}:${index}`;
 
-          // Avoid duplicate processing
-          if (!this.taintedOutpoints.has(outpoint)) {
-            this.taintedOutpoints.add(outpoint);
+          // Check if outpoint is already tainted (in block map or DB)
+          let alreadyTainted = blockTaintedOutpoints.has(outpoint);
 
+          if (!alreadyTainted) {
+            try {
+              const outInfo = await db.get(`tainted_out:${outpoint}`);
+              if (outInfo) {
+                alreadyTainted = true;
+              } else {
+                alreadyTainted = false;
+              }
+            } catch (e) {
+              alreadyTainted = false;
+            }
+          }
+
+          // Avoid duplicate processing
+          if (!alreadyTainted) {
             // Try to get address from this output
             const address = this.getAddressFromScript(vout.scriptPubKey);
 
-            // Add to batch instead of immediate put
-            batch.put(`tainted_out:${outpoint}`, {
+            const outpointInfo = {
               address: address || null,
               degree: currentDegree,
               txHash: txid,
-            });
+            };
+
+            // Add to batch for persistence
+            batch.put(`tainted_out:${outpoint}`, outpointInfo);
+            batchCount++;
+
+            // Also add to block map for intra-block lookups
+            blockTaintedOutpoints.set(outpoint, outpointInfo);
 
             // Only trigger callback if we have an address
             if (address && onTransactionFound) {
@@ -472,7 +500,7 @@ ${error.message}
     }
 
     // Write all tainted outputs in one batch operation
-    if (batch.length > 0) {
+    if (batchCount > 0) {
       await batch.write();
     }
 
