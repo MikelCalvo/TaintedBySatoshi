@@ -389,7 +389,6 @@ ${error.message}
     for (const tx of block.tx) {
       const txid = tx.txid || tx.hash;
       let isTaintSpreading = false;
-      let sourceAddress = null;
       let minDegree = Infinity;
 
       // 1. Check if any input spends a tainted output
@@ -399,21 +398,19 @@ ${error.message}
 
         // First check if it was tainted in this block (not yet in DB)
         if (blockTaintedOutpoints.has(outpoint)) {
-          const outInfo = blockTaintedOutpoints.get(outpoint);
+          const degree = blockTaintedOutpoints.get(outpoint);
           isTaintSpreading = true;
-          if (outInfo.degree < minDegree) {
-            minDegree = outInfo.degree;
-            sourceAddress = outInfo.address;
+          if (degree < minDegree) {
+            minDegree = degree;
           }
         } else {
           // Check DB for tainted outpoint
           try {
-            const outInfo = await db.get(`tainted_out:${outpoint}`);
-            if (outInfo && outInfo.degree !== undefined) {
+            const degree = await db.get(`tainted_out:${outpoint}`);
+            if (degree !== undefined && degree !== null) {
               isTaintSpreading = true;
-              if (outInfo.degree < minDegree) {
-                minDegree = outInfo.degree;
-                sourceAddress = outInfo.address; // Use address from input with minimum degree
+              if (degree < minDegree) {
+                minDegree = degree;
               }
             }
           } catch (e) {
@@ -454,8 +451,8 @@ ${error.message}
 
           if (!alreadyTainted) {
             try {
-              const outInfo = await db.get(`tainted_out:${outpoint}`);
-              if (outInfo) {
+              const degree = await db.get(`tainted_out:${outpoint}`);
+              if (degree !== undefined && degree !== null) {
                 alreadyTainted = true;
               } else {
                 alreadyTainted = false;
@@ -470,18 +467,12 @@ ${error.message}
             // Try to get address from this output
             const address = this.getAddressFromScript(vout.scriptPubKey);
 
-            const outpointInfo = {
-              address: address || null,
-              degree: currentDegree,
-              txHash: txid,
-            };
-
-            // Add to batch for persistence
-            batch.put(`tainted_out:${outpoint}`, outpointInfo);
+            // Store only the degree (saves massive amounts of space)
+            batch.put(`tainted_out:${outpoint}`, currentDegree);
             batchCount++;
 
             // Also add to block map for intra-block lookups
-            blockTaintedOutpoints.set(outpoint, outpointInfo);
+            blockTaintedOutpoints.set(outpoint, currentDegree);
 
             // Only trigger callback if we have an address
             if (address && onTransactionFound) {
@@ -490,7 +481,7 @@ ${error.message}
                   address,
                   formattedTx,
                   currentDegree,
-                  sourceAddress
+                  null // sourceAddress not tracked to save space
                 )
               );
             }
