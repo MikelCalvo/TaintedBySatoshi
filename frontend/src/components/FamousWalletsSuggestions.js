@@ -17,8 +17,12 @@ const FamousWalletsSuggestions = () => (
         <Box key={category.category}>
           <Typography 
             variant="subtitle1" 
-            color="primary" 
-            sx={{ mb: 1.5, fontWeight: 600 }}
+            sx={{ 
+              mb: 2, 
+              fontWeight: 600,
+              color: "primary.main",
+              fontSize: "1.1rem",
+            }}
           >
             {category.category}
           </Typography>
@@ -28,15 +32,18 @@ const FamousWalletsSuggestions = () => (
                 key={wallet.address}
                 elevation={0}
                 sx={{
-                  p: 2,
-                  bgcolor: "grey.50",
+                  p: 2.5,
+                  bgcolor: "background.paper",
                   border: "1px solid",
-                  borderColor: "grey.200",
+                  borderColor: "primary.dark",
+                  borderRadius: 1,
                   "&:hover": {
-                    bgcolor: "grey.100",
+                    bgcolor: "rgba(5, 217, 232, 0.1)",
                     borderColor: "primary.main",
+                    boxShadow: "0 0 10px rgba(5, 217, 232, 0.3)",
+                    transform: "translateY(-2px)",
                   },
-                  transition: "all 0.2s ease",
+                  transition: "all 0.3s ease",
                   cursor: "pointer",
                 }}
               >
@@ -48,7 +55,14 @@ const FamousWalletsSuggestions = () => (
                       display: "block",
                     }}
                   >
-                    <Typography variant="body1" sx={{ fontWeight: 500, color: "text.primary" }}>
+                    <Typography 
+                      variant="body1" 
+                      sx={{ 
+                        fontWeight: 600, 
+                        color: "text.primary",
+                        mb: 0.5,
+                      }}
+                    >
                       {wallet.name}
                     </Typography>
                     <Typography
@@ -57,6 +71,9 @@ const FamousWalletsSuggestions = () => (
                         fontFamily: "monospace",
                         color: "primary.main",
                         wordBreak: "break-all",
+                        fontSize: "0.75rem",
+                        display: "block",
+                        opacity: 0.9,
                       }}
                     >
                       {wallet.address}
