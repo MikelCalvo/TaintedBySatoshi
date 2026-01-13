@@ -1,0 +1,713 @@
+require("dotenv").config();
+const dbService = require("./dbService");
+const bitcoinRPC = require("./bitcoinRPC");
+const { Level } = require("level");
+const path = require("path");
+const fs = require("fs");
+
+// Load Satoshi addresses
+let SATOSHI_ADDRESSES = [];
+function loadSatoshiAddresses() {
+  try {
+    const satoshiData = require("../../data/satoshiAddresses");
+    SATOSHI_ADDRESSES = satoshiData.SATOSHI_ADDRESSES || [];
+    return SATOSHI_ADDRESSES.length > 0;
+  } catch (err) {
+    return false;
+  }
+}
+
+class BackgroundSyncService {
+  constructor() {
+    this.isRunning = false;
+    this.isSyncing = false;
+    this.syncInterval = null;
+    this.lastProcessedBlock = null;
+    this.currentHeight = null;
+    this.syncStats = {
+      lastSyncTime: null,
+      blocksProcessed: 0,
+      addressesUpdated: 0,
+      errors: 0,
+    };
+
+    // Configuration from environment
+    this.config = {
+      syncInterval: parseInt(process.env.SYNC_INTERVAL) || 10 * 60 * 1000, // 10 minutes default
+      enabled: process.env.SYNC_ENABLED !== "false", // default true
+      batchSize: parseInt(process.env.BATCH_SIZE) || 1000,
+      batchFlushInterval: parseInt(process.env.BATCH_FLUSH_INTERVAL) || 5000,
+      chunkSize: parseInt(process.env.CHUNK_SIZE) || 100, // Process 100 blocks per chunk
+    };
+
+    // Batch management
+    this.mainBatch = null;
+    this.batchCount = 0;
+    this.lastBatchFlush = Date.now();
+    this.parentTaintingCache = new Map();
+  }
+
+  async start() {
+    if (this.isRunning) {
+      console.log("Background sync service is already running");
+      return;
+    }
+
+    if (!this.config.enabled) {
+      console.log("Background sync is disabled (SYNC_ENABLED=false)");
+      return;
+    }
+
+    this.isRunning = true;
+    console.log("Background sync service initializing...");
+
+    // Initialize Bitcoin RPC connection
+    try {
+      await bitcoinRPC.initialize();
+    } catch (error) {
+      console.error("Failed to initialize Bitcoin RPC:", error.message);
+      this.isRunning = false;
+      return;
+    }
+
+    // Run initialization steps if needed
+    try {
+      await this.ensureInitialized();
+    } catch (error) {
+      console.error("Failed to initialize database:", error.message);
+      this.isRunning = false;
+      return;
+    }
+
+    console.log(`Background sync service started`);
+
+    // Start continuous sync loop
+    this.startSyncLoop();
+  }
+
+  async initializeCoinbaseOutputs() {
+    const DB_PATH = process.env.DB_PATH || path.join(__dirname, "../../data");
+    const scanDb = new Level(path.join(DB_PATH, "scan_progress"), {
+      valueEncoding: "json",
+      createIfMissing: true,
+    });
+    await scanDb.open();
+
+    try {
+      console.log("🔍 Initializing Satoshi coinbase outputs as tainted...");
+      console.log(`Using ${SATOSHI_ADDRESSES.length.toLocaleString()} Patoshi addresses`);
+      console.log(`📚 Source: https://github.com/bensig/patoshi-addresses`);
+      console.log(`   Patoshi Pattern Analysis by Sergio Demian Lerner`);
+      console.log(`   https://bitslog.com/2013/04/17/the-well-deserved-fortune-of-satoshi-nakamoto/`);
+      console.log("\nScanning Patoshi blocks to extract coinbase outputs...");
+
+      const { PATOSHI_BLOCKS } = require("../../data/patoshiBlocks");
+      const coinbaseBatch = scanDb.batch();
+      let initCount = 0;
+
+      // Add genesis and early blocks
+      const EARLY_BLOCKS = [0, 1, 2];
+      const allBlocks = [...EARLY_BLOCKS, ...PATOSHI_BLOCKS];
+
+      for (let i = 0; i < allBlocks.length; i++) {
+        const height = allBlocks[i];
+
+        if (i % 1000 === 0) {
+          console.log(
+            `  Progress: ${i}/${allBlocks.length} (${((i / allBlocks.length) * 100).toFixed(1)}%)`
+          );
+        }
+
+        try {
+          const hash = await bitcoinRPC.call("getblockhash", [height]);
+          const block = await bitcoinRPC.call("getblock", [hash, 2]);
+          const coinbaseTx = block.tx[0];
+
+          // Mark each coinbase output as tainted
+          for (let voutIndex = 0; voutIndex < coinbaseTx.vout.length; voutIndex++) {
+            const vout = coinbaseTx.vout[voutIndex];
+            const address = bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
+            const outpoint = `${coinbaseTx.txid}:${voutIndex}`;
+
+            coinbaseBatch.put(`tainted_out:${outpoint}`, {
+              address: address || null,
+              degree: 0,
+              txHash: coinbaseTx.txid,
+              blockHeight: height,
+            });
+            initCount++;
+          }
+        } catch (error) {
+          console.error(`Error processing block ${height}:`, error.message);
+        }
+      }
+
+      await coinbaseBatch.write();
+      await scanDb.put("satoshi_coinbase_initialized", {
+        initialized: true,
+        timestamp: Date.now(),
+        count: initCount,
+      });
+
+      console.log(`✓ Initialized ${initCount} Satoshi coinbase outputs as tainted\n`);
+    } catch (error) {
+      console.error("Failed to initialize coinbase outputs:", error.message);
+      throw error;
+    } finally {
+      await scanDb.close();
+    }
+  }
+
+  startSyncLoop() {
+    const syncLoop = async () => {
+      if (!this.isRunning) {
+        return; // Stop loop if service is stopped
+      }
+
+      try {
+        await this.checkAndSync();
+      } catch (err) {
+        console.error("Error in sync loop:", err.message);
+        this.syncStats.errors++;
+      }
+
+      // Adaptive interval: faster when catching up, slower when synced
+      let nextInterval;
+      if (this.currentHeight && this.lastProcessedBlock !== null) {
+        const blocksBehind = this.currentHeight - this.lastProcessedBlock;
+
+        if (blocksBehind > 1000) {
+          // Very behind: sync every 5 seconds
+          nextInterval = 5000;
+        } else if (blocksBehind > 100) {
+          // Behind: sync every 30 seconds
+          nextInterval = 30000;
+        } else if (blocksBehind > 0) {
+          // Almost caught up: sync every 2 minutes
+          nextInterval = 2 * 60 * 1000;
+        } else {
+          // Fully synced: check every 10 minutes (or configured interval)
+          nextInterval = this.config.syncInterval;
+        }
+      } else {
+        // Initial state: check every 30 seconds
+        nextInterval = 30000;
+      }
+
+      // Schedule next sync
+      this.syncInterval = setTimeout(syncLoop, nextInterval);
+    };
+
+    // Start the loop
+    syncLoop();
+  }
+
+  async ensureInitialized() {
+    const satoshiAddressesPath = path.join(__dirname, "../../data/satoshiAddresses.js");
+    const DB_PATH = process.env.DB_PATH || path.join(__dirname, "../../data");
+    
+    // Ensure data directory exists
+    if (!fs.existsSync(DB_PATH)) {
+      fs.mkdirSync(DB_PATH, { recursive: true });
+    }
+
+    // Step 1: Check and extract Patoshi addresses if needed
+    if (!fs.existsSync(satoshiAddressesPath)) {
+      console.log("\n⚠️  Patoshi addresses not found.");
+      console.log("📥 Extracting Patoshi addresses automatically (this may take 25-30 minutes)...\n");
+
+      const { extractPatoshiAddresses } = require("../scripts/extractPatoshiAddresses");
+      const result = await extractPatoshiAddresses();
+
+      console.log(`\n✅ Extracted ${result.count} addresses`);
+      console.log(`✓ Continuing with initialization...\n`);
+
+      // Clear require cache so we can load the new file
+      delete require.cache[require.resolve(satoshiAddressesPath)];
+    }
+
+    // Load addresses
+    if (!loadSatoshiAddresses()) {
+      throw new Error("Failed to load Satoshi addresses after extraction");
+    }
+
+    if (SATOSHI_ADDRESSES.length === 0) {
+      throw new Error("No Satoshi addresses found in satoshiAddresses.js");
+    }
+
+    // Step 2: Initialize main database and Satoshi addresses
+    const db = await dbService.init();
+    
+    // Check if Satoshi addresses are initialized in main DB
+    let needsSatoshiInit = false;
+    try {
+      // Check if at least one Satoshi address exists in DB
+      const testAddress = SATOSHI_ADDRESSES[0];
+      await db.get(`tainted:${testAddress}`);
+    } catch (err) {
+      needsSatoshiInit = true;
+    }
+
+    if (needsSatoshiInit) {
+      console.log("Initializing Satoshi addresses in database...");
+      const taintedBatch = db.batch();
+      for (const address of SATOSHI_ADDRESSES) {
+        taintedBatch.put(`tainted:${address}`, {
+          txHash: null,
+          originalSatoshiAddress: address,
+          amount: 0,
+          degree: 0,
+          path: [],
+          lastUpdated: Date.now(),
+        });
+      }
+      await taintedBatch.write();
+      console.log(`✓ Initialized ${SATOSHI_ADDRESSES.length.toLocaleString()} Satoshi addresses\n`);
+    }
+
+    // Step 3: Initialize coinbase outputs in scan_progress DB
+    const scanDb = new Level(path.join(DB_PATH, "scan_progress"), {
+      valueEncoding: "json",
+      createIfMissing: true,
+    });
+    await scanDb.open();
+
+    let needsCoinbaseInit = false;
+    try {
+      await scanDb.get("satoshi_coinbase_initialized");
+    } catch (err) {
+      needsCoinbaseInit = true;
+    }
+
+    if (needsCoinbaseInit) {
+      console.log("🔍 Initializing Satoshi coinbase outputs in background...");
+      console.log(`   This is a one-time process that may take 25-30 minutes.`);
+      console.log(`   The server will continue serving requests.\n`);
+
+      // Initialize coinbase outputs in background (non-blocking)
+      await scanDb.close();
+      setImmediate(() => {
+        this.initializeCoinbaseOutputs().catch((err) => {
+          console.error("Error initializing coinbase outputs:", err.message);
+        });
+      });
+    } else {
+      await scanDb.close();
+    }
+
+    // The continuous sync loop will automatically process any pending blocks
+  }
+
+  async stop() {
+    if (!this.isRunning) {
+      return;
+    }
+
+    this.isRunning = false;
+    if (this.syncInterval) {
+      clearTimeout(this.syncInterval);
+      this.syncInterval = null;
+    }
+
+    // Flush any pending batch
+    await this.flushBatch();
+
+    console.log("Background sync service stopped");
+  }
+
+  async checkAndSync() {
+    if (this.isSyncing) {
+      return; // Already syncing, skip this check
+    }
+
+    try {
+      this.isSyncing = true;
+
+      // Get current blockchain height
+      const blockchainInfo = await bitcoinRPC.getBlockchainInfo();
+      this.currentHeight = blockchainInfo.blocks;
+
+      // Get last processed block from scan_progress DB
+      const scanDb = await bitcoinRPC.openDatabase();
+      let lastProcessedBlock = -1;
+
+      try {
+        const progress = await scanDb.get("scan_progress");
+        lastProcessedBlock = progress.lastBlock || -1;
+      } catch (err) {
+        // No progress saved, start from beginning
+        lastProcessedBlock = -1;
+      }
+
+      this.lastProcessedBlock = lastProcessedBlock;
+
+      // Check if there are blocks to process
+      if (this.currentHeight > lastProcessedBlock) {
+        const blocksToProcess = this.currentHeight - lastProcessedBlock;
+        const startBlock = lastProcessedBlock + 1;
+
+        // Process in chunks to avoid blocking for too long
+        const endBlock = Math.min(startBlock + this.config.chunkSize - 1, this.currentHeight);
+        const remainingBlocks = this.currentHeight - lastProcessedBlock;
+
+        console.log(`[Background Sync] Processing chunk: blocks ${startBlock}-${endBlock} (${remainingBlocks.toLocaleString()} remaining)`);
+
+        await this.syncNewBlocks(startBlock, endBlock, scanDb);
+      } else {
+        // No new blocks, just update stats
+        this.syncStats.lastSyncTime = new Date().toISOString();
+      }
+    } catch (error) {
+      console.error("[Background Sync] Error during sync check:", error.message);
+      this.syncStats.errors++;
+    } finally {
+      this.isSyncing = false;
+    }
+  }
+
+  async syncNewBlocks(startBlock, endBlock, scanDb) {
+    const db = await dbService.init();
+    let processedBlocks = 0;
+
+    // Initialize batch for main DB
+    this.mainBatch = db.batch();
+    this.batchCount = 0;
+    this.lastBatchFlush = Date.now();
+
+    try {
+      for (let height = startBlock; height <= endBlock; height++) {
+        try {
+          // Get block hash
+          const hash = await bitcoinRPC.call("getblockhash", [height]);
+
+          // Get full block data
+          const block = await bitcoinRPC.call("getblock", [hash, 2]);
+
+          // Process the block
+          await this.processBlock(block, db, scanDb);
+
+          processedBlocks++;
+          this.syncStats.blocksProcessed++;
+
+          // Flush batch periodically or when it reaches size limit
+          if (this.batchCount >= this.config.batchSize || 
+              Date.now() - this.lastBatchFlush >= this.config.batchFlushInterval) {
+            await this.flushBatch();
+            this.mainBatch = db.batch();
+            this.batchCount = 0;
+            this.lastBatchFlush = Date.now();
+          }
+
+          // Update scan_progress after each block
+          await scanDb.put("scan_progress", {
+            lastBlock: height,
+            transactions: {}, // Not needed for incremental sync
+            lastUpdated: Date.now(),
+          });
+
+        } catch (error) {
+          console.error(`[Background Sync] Error processing block ${height}:`, error.message);
+          this.syncStats.errors++;
+          // Continue with next block instead of retrying
+        }
+      }
+
+      // Final batch flush
+      await this.flushBatch();
+
+      this.syncStats.lastSyncTime = new Date().toISOString();
+      console.log(`[Background Sync] Processed ${processedBlocks} blocks successfully`);
+    } catch (error) {
+      console.error("[Background Sync] Error in syncNewBlocks:", error.message);
+      throw error;
+    }
+  }
+
+  async processBlock(block, db, scanDb) {
+    const taintedOutBatch = scanDb.batch();
+    const callbackPromises = [];
+    let taintedOutCount = 0;
+    const blockTaintedOutpoints = new Map();
+
+    for (const tx of block.tx) {
+      const txid = tx.txid || tx.hash;
+      let isTaintSpreading = false;
+      let minDegree = Infinity;
+
+      // 1. Check if any input spends a tainted output
+      for (const vin of tx.vin) {
+        if (vin.coinbase) continue;
+        const outpoint = `${vin.txid}:${vin.vout}`;
+
+        // First check if it was tainted in this block
+        if (blockTaintedOutpoints.has(outpoint)) {
+          const degree = blockTaintedOutpoints.get(outpoint);
+          isTaintSpreading = true;
+          if (degree < minDegree) {
+            minDegree = degree;
+          }
+        } else {
+          // Check DB for tainted outpoint
+          try {
+            const degree = await scanDb.get(`tainted_out:${outpoint}`);
+            if (degree !== undefined && degree !== null) {
+              isTaintSpreading = true;
+              if (degree < minDegree) {
+                minDegree = degree;
+              }
+            }
+          } catch (e) {
+            // Not tainted, continue
+          }
+        }
+      }
+
+      // 2. Check if any output goes to a known Satoshi address
+      const outputs = tx.vout
+        .map((vout, index) => ({
+          index,
+          address: bitcoinRPC.getAddressFromScript(vout.scriptPubKey),
+          value: vout.value,
+        }))
+        .filter((o) => o.address);
+
+      const goesToSatoshi = outputs.some((o) =>
+        SATOSHI_ADDRESSES.includes(o.address)
+      );
+      if (goesToSatoshi) {
+        isTaintSpreading = true;
+        minDegree = -1; // Use -1 so that currentDegree = 0 (seed)
+      }
+
+      if (isTaintSpreading) {
+        const currentDegree = minDegree + 1;
+        const formattedTx = bitcoinRPC.formatTransaction(tx);
+
+        // Find source address from tainted inputs
+        let sourceAddress = null;
+        for (const vin of tx.vin) {
+          if (vin.coinbase) continue;
+          const outpoint = `${vin.txid}:${vin.vout}`;
+          
+          // Check if this input is tainted
+          let inputDegree = null;
+          if (blockTaintedOutpoints.has(outpoint)) {
+            inputDegree = blockTaintedOutpoints.get(outpoint);
+          } else {
+            try {
+              inputDegree = await scanDb.get(`tainted_out:${outpoint}`);
+            } catch (e) {
+              // Not tainted
+            }
+          }
+
+          // If this input is tainted and has the minimum degree, use it as source
+          if (inputDegree !== null && inputDegree === minDegree) {
+            // Try to get address from prevout
+            if (vin.prevout && vin.prevout.scriptPubKey) {
+              sourceAddress = bitcoinRPC.getAddressFromScript(vin.prevout.scriptPubKey);
+            } else if (formattedTx.inputs && formattedTx.inputs.length > 0) {
+              // Fallback to formatted transaction inputs
+              const input = formattedTx.inputs.find(
+                (inp) => inp.prev_out && inp.prev_out.addr
+              );
+              if (input) {
+                sourceAddress = input.prev_out.addr;
+              }
+            }
+            if (sourceAddress) break; // Found source, stop looking
+          }
+        }
+
+        // Process ALL outputs
+        for (let index = 0; index < tx.vout.length; index++) {
+          const vout = tx.vout[index];
+          const outpoint = `${txid}:${index}`;
+
+          // Check if outpoint is already tainted
+          let alreadyTainted = blockTaintedOutpoints.has(outpoint);
+
+          if (!alreadyTainted) {
+            try {
+              const degree = await scanDb.get(`tainted_out:${outpoint}`);
+              if (degree !== undefined && degree !== null) {
+                alreadyTainted = true;
+              }
+            } catch (e) {
+              alreadyTainted = false;
+            }
+          }
+
+          if (!alreadyTainted) {
+            const address = bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
+
+            // Store tainted outpoint in batch
+            taintedOutBatch.put(`tainted_out:${outpoint}`, currentDegree);
+            taintedOutCount++;
+            blockTaintedOutpoints.set(outpoint, currentDegree);
+
+            // Process address if we have one
+            if (address) {
+              callbackPromises.push(
+                this.processAddressInBatch(
+                  address,
+                  currentDegree,
+                  formattedTx,
+                  db,
+                  sourceAddress
+                )
+              );
+            }
+          }
+        }
+      }
+    }
+
+    // Write tainted outputs batch
+    if (taintedOutCount > 0) {
+      await taintedOutBatch.write();
+    }
+
+    // Execute address processing callbacks
+    if (callbackPromises.length > 0) {
+      await Promise.all(callbackPromises);
+    }
+  }
+
+  async processAddressInBatch(address, currentDegree, transaction, db, sourceAddress = null) {
+    try {
+      // Check if we already have a shorter path
+      try {
+        const existing = await db.get(`tainted:${address}`);
+        if (existing.degree <= currentDegree) {
+          return; // Skip if we already have a shorter or equal path
+        }
+      } catch (err) {
+        // Address not yet tainted, proceed
+      }
+
+      let path = [];
+      let originalSatoshiAddress = address;
+
+      // Try to get parent tainting info from sourceAddress
+      let parentTinting = null;
+      if (sourceAddress) {
+        // Try cache first
+        parentTinting = this.parentTaintingCache.get(sourceAddress);
+        if (!parentTinting) {
+          try {
+            parentTinting = await db.get(`tainted:${sourceAddress}`);
+            // Cache it
+            if (this.parentTaintingCache.size > 10000) {
+              const firstKey = this.parentTaintingCache.keys().next().value;
+              this.parentTaintingCache.delete(firstKey);
+            }
+            this.parentTaintingCache.set(sourceAddress, parentTinting);
+          } catch (err) {
+            // Parent not found
+          }
+        }
+      }
+
+      if (parentTinting) {
+        originalSatoshiAddress = parentTinting.originalSatoshiAddress;
+        const output = transaction.out.find((o) => o.addr === address);
+        const amount = output ? output.value : 0;
+        path = [
+          ...parentTinting.path,
+          {
+            from: sourceAddress,
+            to: address,
+            txHash: transaction.hash,
+            amount: amount,
+          },
+        ];
+      } else if (SATOSHI_ADDRESSES.includes(address)) {
+        originalSatoshiAddress = address;
+      }
+
+      // Store transaction in batch (if not already stored)
+      const txKey = `tx:${transaction.hash}`;
+      try {
+        await db.get(txKey);
+      } catch (err) {
+        this.mainBatch.put(txKey, {
+          hash: transaction.hash,
+          time: transaction.time,
+          inputs: transaction.inputs,
+          outputs: transaction.out,
+          degree: currentDegree,
+        });
+        this.batchCount++;
+      }
+
+      // Store tainting information in batch
+      const taintData = {
+        txHash: transaction.hash,
+        originalSatoshiAddress,
+        amount: transaction.out.find((o) => o.addr === address)?.value || 0,
+        degree: currentDegree,
+        path,
+        lastUpdated: Date.now(),
+      };
+
+      this.mainBatch.put(`tainted:${address}`, taintData);
+      this.batchCount++;
+      this.syncStats.addressesUpdated++;
+
+      // Update cache
+      if (this.parentTaintingCache.size <= 10000) {
+        this.parentTaintingCache.set(address, taintData);
+      } else {
+        // Remove oldest entry
+        const firstKey = this.parentTaintingCache.keys().next().value;
+        this.parentTaintingCache.delete(firstKey);
+        this.parentTaintingCache.set(address, taintData);
+      }
+    } catch (error) {
+      console.error(`[Background Sync] Error processing address ${address}:`, error.message);
+    }
+  }
+
+  async flushBatch() {
+    if (this.mainBatch && this.batchCount > 0) {
+      try {
+        await this.mainBatch.write();
+        this.batchCount = 0;
+      } catch (error) {
+        console.error("[Background Sync] Error flushing batch:", error.message);
+        throw error;
+      }
+    }
+  }
+
+  getStatus() {
+    const blocksBehind = this.currentHeight !== null && this.lastProcessedBlock !== null
+      ? this.currentHeight - this.lastProcessedBlock
+      : null;
+
+    const progress = this.currentHeight !== null && this.lastProcessedBlock !== null && this.currentHeight > 0
+      ? ((this.lastProcessedBlock / this.currentHeight) * 100).toFixed(2)
+      : null;
+
+    return {
+      isRunning: this.isRunning,
+      isSyncing: this.isSyncing,
+      lastProcessedBlock: this.lastProcessedBlock,
+      currentHeight: this.currentHeight,
+      blocksBehind,
+      progress: progress !== null ? `${progress}%` : null,
+      stats: this.syncStats,
+      config: {
+        syncInterval: this.config.syncInterval,
+        enabled: this.config.enabled,
+        batchSize: this.config.batchSize,
+        batchFlushInterval: this.config.batchFlushInterval,
+        chunkSize: this.config.chunkSize,
+      },
+    };
+  }
+}
+
+// Export singleton instance
+module.exports = new BackgroundSyncService();

@@ -1,6 +1,16 @@
 const dbService = require("./dbService");
 
-const { SATOSHI_ADDRESSES, SATOSHI_NOTES } = require("../../data/satoshiAddresses");
+// Load Satoshi addresses with error handling
+let SATOSHI_ADDRESSES = [];
+let SATOSHI_NOTES = {};
+try {
+  const satoshiData = require("../../data/satoshiAddresses");
+  SATOSHI_ADDRESSES = satoshiData.SATOSHI_ADDRESSES || [];
+  SATOSHI_NOTES = satoshiData.SATOSHI_NOTES || {};
+} catch (err) {
+  // File doesn't exist yet - will be created by initialization
+  console.warn("Note: satoshiAddresses.js not found. Run initialization first.");
+}
 
 async function checkAddressConnection(address) {
   let db = null;

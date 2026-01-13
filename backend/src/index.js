@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { checkAddressConnection } = require("./services/bitcoinService");
+const backgroundSyncService = require("./services/backgroundSyncService");
 const fs = require("fs");
 const path = require("path");
 
@@ -68,6 +69,23 @@ app.use((err, req, res, next) => {
   });
 });
 
+// Sync status endpoint
+app.get("/api/sync-status", (req, res) => {
+  try {
+    const status = backgroundSyncService.getStatus();
+    res.json(status);
+  } catch (error) {
+    console.error("Error getting sync status:", error);
+    res.status(500).json({
+      error: "Failed to get sync status",
+      message:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : "Internal server error",
+    });
+  }
+});
+
 // Check if an address is connected to Satoshi
 app.get("/api/check/:address", async (req, res) => {
   const controller = new AbortController();
@@ -105,6 +123,14 @@ app.get("/api/check/:address", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
+  
+  // Start background sync service
+  try {
+    await backgroundSyncService.start();
+  } catch (error) {
+    console.error("Failed to start background sync service:", error.message);
+    // Don't exit - server can still serve requests without sync
+  }
 });

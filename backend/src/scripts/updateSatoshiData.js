@@ -107,12 +107,17 @@ const scanStats = {
   newInThisScan: 0,
 };
 
+// Batch configuration
+const BATCH_SIZE = parseInt(process.env.BATCH_SIZE) || 1000;
+const BATCH_FLUSH_INTERVAL = parseInt(process.env.BATCH_FLUSH_INTERVAL) || 5000;
+
 async function processAddress(
   address,
   currentDegree,
   db,
   transaction,
-  sourceAddress = null
+  sourceAddress = null,
+  batchContext = null
 ) {
   try {
     const tx = transaction;
@@ -171,18 +176,14 @@ async function processAddress(
       }
     }
 
-    // Store the transaction if not already stored (check cache first)
+    // Store the transaction if not already stored
     const txKey = `tx:${tx.hash}`;
+    let txExists = false;
     try {
       await db.get(txKey);
+      txExists = true;
     } catch (err) {
-      await db.put(txKey, {
-        hash: tx.hash,
-        time: tx.time,
-        inputs: tx.inputs,
-        outputs: tx.out,
-        degree: currentDegree,
-      });
+      txExists = false;
     }
 
     // Store tinting information
@@ -195,7 +196,43 @@ async function processAddress(
       lastUpdated: Date.now(),
     };
 
-    await db.put(`tainted:${address}`, taintData);
+    // Use batch if available, otherwise write individually
+    if (batchContext && batchContext.batch) {
+      // Add to batch
+      if (!txExists) {
+        batchContext.batch.put(txKey, {
+          hash: tx.hash,
+          time: tx.time,
+          inputs: tx.inputs,
+          outputs: tx.out,
+          degree: currentDegree,
+        });
+        batchContext.count++;
+      }
+      batchContext.batch.put(`tainted:${address}`, taintData);
+      batchContext.count++;
+
+      // Flush batch if it reaches size limit or time limit
+      if (batchContext.count >= BATCH_SIZE || 
+          (Date.now() - batchContext.lastFlush) >= BATCH_FLUSH_INTERVAL) {
+        await batchContext.batch.write();
+        batchContext.batch = db.batch();
+        batchContext.count = 0;
+        batchContext.lastFlush = Date.now();
+      }
+    } else {
+      // Fallback to individual writes (for backward compatibility)
+      if (!txExists) {
+        await db.put(txKey, {
+          hash: tx.hash,
+          time: tx.time,
+          inputs: tx.inputs,
+          outputs: tx.out,
+          degree: currentDegree,
+        });
+      }
+      await db.put(`tainted:${address}`, taintData);
+    }
 
     // Update statistics
     scanStats.totalTainted++;
@@ -573,6 +610,14 @@ async function updateSatoshiTransactions() {
     // Add separator and buffer lines so node status stays visible above
     console.log("════════════════════════════════════════════════════════════");
     console.log();
+    
+    // Initialize batch context for processAddress
+    const batchContext = {
+      batch: db.batch(),
+      count: 0,
+      lastFlush: Date.now(),
+    };
+
     await timeoutPromise(
       () =>
         bitcoinRPC.getAddressTransactions(
@@ -592,13 +637,20 @@ async function updateSatoshiTransactions() {
               degree,
               db,
               transaction,
-              sourceAddress
+              sourceAddress,
+              batchContext
             );
           }
         ),
       BLOCK_FETCH_TIMEOUT * 10, // Very long timeout for the whole scan
       1
     );
+
+    // Flush any remaining batch operations
+    if (batchContext.count > 0) {
+      await batchContext.batch.write();
+      console.log("Final batch write completed");
+    }
 
     console.log("Successfully updated Satoshi transactions database");
   } catch (error) {
