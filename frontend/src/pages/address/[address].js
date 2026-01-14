@@ -164,7 +164,9 @@ export default function AddressPage({ address, initialLoad }) {
         };
 
         const result = await retryWithBackoff(async () => {
-          const response = await fetch(`${API_URL}/api/check/${address}`, {
+          // Encode address to prevent URL injection
+          const encodedAddress = encodeURIComponent(address);
+          const response = await fetch(`${API_URL}/api/check/${encodedAddress}`, {
             headers: {
               Accept: "application/json",
               "Cache-Control": "no-cache",

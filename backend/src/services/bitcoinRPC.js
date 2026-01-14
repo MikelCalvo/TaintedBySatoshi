@@ -98,6 +98,7 @@ class BitcoinRPC {
     this.dbStatus = {
       isOpen: false,
       instance: null,
+      opening: null, // Promise to prevent concurrent open attempts
     };
 
     // Initialize worker pool
@@ -704,23 +705,38 @@ ${error.message}
 
   // Add database management methods
   async openDatabase() {
-    if (!this.dbStatus.isOpen) {
-      this.dbStatus.instance = new Level(path.join(DB_PATH, "scan_progress"), {
-        valueEncoding: "json",
-        createIfMissing: true,
-      });
-      // Ensure the database is actually open
-      try {
-        await this.dbStatus.instance.open();
-      } catch (err) {
-        // If already open, ignore the error
-        if (err.code !== 'LEVEL_DATABASE_NOT_CLOSED') {
-          throw err;
-        }
-      }
-      this.dbStatus.isOpen = true;
+    // If already open, return the instance
+    if (this.dbStatus.isOpen && this.dbStatus.instance) {
+      return this.dbStatus.instance;
     }
-    return this.dbStatus.instance;
+
+    // If another call is already opening the database, wait for it
+    if (this.dbStatus.opening) {
+      return this.dbStatus.opening;
+    }
+
+    // Start opening the database
+    this.dbStatus.opening = (async () => {
+      try {
+        const dbPath = path.join(DB_PATH, "scan_progress");
+        this.dbStatus.instance = new Level(dbPath, {
+          valueEncoding: "json",
+          createIfMissing: true,
+        });
+        await this.dbStatus.instance.open();
+        this.dbStatus.isOpen = true;
+        return this.dbStatus.instance;
+      } catch (err) {
+        // Clean up on error
+        this.dbStatus.instance = null;
+        this.dbStatus.isOpen = false;
+        throw new Error(`Database failed to open: ${err.message}`);
+      } finally {
+        this.dbStatus.opening = null;
+      }
+    })();
+
+    return this.dbStatus.opening;
   }
 
   async closeDatabase() {

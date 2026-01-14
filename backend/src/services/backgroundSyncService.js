@@ -1,7 +1,6 @@
 require("dotenv").config();
 const dbService = require("./dbService");
 const bitcoinRPC = require("./bitcoinRPC");
-const { Level } = require("level");
 const path = require("path");
 const fs = require("fs");
 
@@ -45,6 +44,8 @@ class BackgroundSyncService {
     this.batchCount = 0;
     this.lastBatchFlush = Date.now();
     this.parentTaintingCache = new Map();
+    this.batchIsValid = false;
+    this.mainDb = null;
   }
 
   async start() {
@@ -102,12 +103,8 @@ class BackgroundSyncService {
   }
 
   async initializeCoinbaseOutputs() {
-    const DB_PATH = process.env.DB_PATH || path.join(__dirname, "../../data");
-    const scanDb = new Level(path.join(DB_PATH, "scan_progress"), {
-      valueEncoding: "json",
-      createIfMissing: true,
-    });
-    await scanDb.open();
+    // Use shared database instance to avoid locking conflicts
+    const scanDb = await bitcoinRPC.openDatabase();
 
     try {
       console.log("🔍 Initializing Satoshi coinbase outputs as tainted...");
@@ -169,9 +166,8 @@ class BackgroundSyncService {
     } catch (error) {
       console.error("Failed to initialize coinbase outputs:", error.message);
       throw error;
-    } finally {
-      await scanDb.close();
     }
+    // Don't close scanDb - it's a shared instance managed by bitcoinRPC
   }
 
   startSyncLoop() {
@@ -308,11 +304,8 @@ class BackgroundSyncService {
       // Check coinbase initialization completely in background
       setImmediate(async () => {
         try {
-          const scanDb = new Level(path.join(DB_PATH, "scan_progress"), {
-            valueEncoding: "json",
-            createIfMissing: true,
-          });
-          await scanDb.open();
+          // Use shared database instance to avoid locking conflicts
+          const scanDb = await bitcoinRPC.openDatabase();
 
           let needsCoinbaseInit = false;
           try {
@@ -323,7 +316,7 @@ class BackgroundSyncService {
             console.log("[Init] Coinbase outputs need initialization");
           }
 
-          await scanDb.close();
+          // Don't close scanDb - it's a shared instance
 
           if (needsCoinbaseInit) {
             console.log("🔍 Initializing Satoshi coinbase outputs in background...");
@@ -359,6 +352,8 @@ class BackgroundSyncService {
 
     // Flush any pending batch
     await this.flushBatch();
+    this.batchIsValid = false;
+    this.mainDb = null;
 
     console.log("Background sync service stopped");
   }
@@ -415,12 +410,11 @@ class BackgroundSyncService {
 
   async syncNewBlocks(startBlock, endBlock, scanDb) {
     const db = await dbService.init();
+    this.mainDb = db;
     let processedBlocks = 0;
 
     // Initialize batch for main DB
-    this.mainBatch = db.batch();
-    this.batchCount = 0;
-    this.lastBatchFlush = Date.now();
+    this.resetBatch();
 
     try {
       for (let height = startBlock; height <= endBlock; height++) {
@@ -438,12 +432,10 @@ class BackgroundSyncService {
           this.syncStats.blocksProcessed++;
 
           // Flush batch periodically or when it reaches size limit
-          if (this.batchCount >= this.config.batchSize || 
+          if (this.batchCount >= this.config.batchSize ||
               Date.now() - this.lastBatchFlush >= this.config.batchFlushInterval) {
             await this.flushBatch();
-            this.mainBatch = db.batch();
-            this.batchCount = 0;
-            this.lastBatchFlush = Date.now();
+            this.resetBatch();
           }
 
           // Update scan_progress after each block
@@ -456,6 +448,12 @@ class BackgroundSyncService {
         } catch (error) {
           console.error(`[Background Sync] Error processing block ${height}:`, error.message);
           this.syncStats.errors++;
+
+          // If batch became invalid due to IO error, reset it for next block
+          if (!this.batchIsValid) {
+            console.log("[Background Sync] Resetting batch after error");
+            this.resetBatch();
+          }
           // Continue with next block instead of retrying
         }
       }
@@ -467,7 +465,10 @@ class BackgroundSyncService {
       console.log(`[Background Sync] Processed ${processedBlocks} blocks successfully`);
     } catch (error) {
       console.error("[Background Sync] Error in syncNewBlocks:", error.message);
-      throw error;
+      this.batchIsValid = false;
+      // Don't throw - allow sync loop to continue
+    } finally {
+      this.mainDb = null;
     }
   }
 
@@ -679,14 +680,13 @@ class BackgroundSyncService {
       try {
         await db.get(txKey);
       } catch (err) {
-        this.mainBatch.put(txKey, {
+        this.safeBatchPut(txKey, {
           hash: transaction.hash,
           time: transaction.time,
           inputs: transaction.inputs,
           outputs: transaction.out,
           degree: currentDegree,
         });
-        this.batchCount++;
       }
 
       // Store tainting information in batch
@@ -699,9 +699,9 @@ class BackgroundSyncService {
         lastUpdated: Date.now(),
       };
 
-      this.mainBatch.put(`tainted:${address}`, taintData);
-      this.batchCount++;
-      this.syncStats.addressesUpdated++;
+      if (this.safeBatchPut(`tainted:${address}`, taintData)) {
+        this.syncStats.addressesUpdated++;
+      }
 
       // Update cache
       if (this.parentTaintingCache.size <= 10000) {
@@ -717,14 +717,42 @@ class BackgroundSyncService {
     }
   }
 
+  resetBatch() {
+    if (this.mainDb) {
+      this.mainBatch = this.mainDb.batch();
+      this.batchCount = 0;
+      this.lastBatchFlush = Date.now();
+      this.batchIsValid = true;
+    }
+  }
+
+  safeBatchPut(key, value) {
+    if (!this.batchIsValid || !this.mainBatch) {
+      // Batch is invalid, skip this operation
+      return false;
+    }
+    try {
+      this.mainBatch.put(key, value);
+      this.batchCount++;
+      return true;
+    } catch (error) {
+      // Batch became invalid (closed/written)
+      console.error("[Background Sync] Batch operation failed, marking batch as invalid:", error.message);
+      this.batchIsValid = false;
+      return false;
+    }
+  }
+
   async flushBatch() {
-    if (this.mainBatch && this.batchCount > 0) {
+    if (this.mainBatch && this.batchCount > 0 && this.batchIsValid) {
       try {
         await this.mainBatch.write();
         this.batchCount = 0;
+        this.batchIsValid = false; // Batch is consumed after write
       } catch (error) {
         console.error("[Background Sync] Error flushing batch:", error.message);
-        throw error;
+        this.batchIsValid = false;
+        // Don't throw - let the caller handle recovery
       }
     }
   }

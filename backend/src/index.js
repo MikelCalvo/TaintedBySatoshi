@@ -1,35 +1,104 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 const { checkAddressConnection } = require("./services/bitcoinService");
 const backgroundSyncService = require("./services/backgroundSyncService");
+const { validateAndSanitizeAddress } = require("./utils/validation");
 const fs = require("fs");
 const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const isDevelopment = process.env.NODE_ENV === "development";
+
+// Trust proxy (nginx, cloudflare, etc.) for correct IP detection in rate limiting
+app.set("trust proxy", 1);
+
+// Security headers with helmet
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:"],
+        connectSrc: ["'self'"],
+        fontSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        frameSrc: ["'none'"],
+        upgradeInsecureRequests: isDevelopment ? null : [],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
+
+// Rate limiting - general API
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per windowMs
+  message: {
+    error: "Too many requests",
+    message: "Please try again later",
+    retryAfter: "15 minutes",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Stricter rate limiting for address check endpoint
+const addressCheckLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30, // 30 requests per minute
+  message: {
+    error: "Too many address check requests",
+    message: "Please wait before checking more addresses",
+    retryAfter: "1 minute",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Apply general rate limiter to all routes
+app.use(generalLimiter);
+
+// CORS configuration
+const allowedOrigins = [process.env.FRONTEND_URL].filter(Boolean);
+if (isDevelopment) {
+  allowedOrigins.push("http://localhost:1337", "http://localhost:3000");
+}
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      const allowedOrigins = [process.env.FRONTEND_URL].filter(Boolean);
-
-      if (process.env.NODE_ENV === "development") {
-        allowedOrigins.push("http://localhost:1337");
+      // Allow requests with no origin (mobile apps, curl, health checks) only in development
+      if (!origin && isDevelopment) {
+        return callback(null, true);
       }
 
-      if (!origin || allowedOrigins.includes(origin)) {
+      // In production, silently reject requests without origin (no error logging)
+      if (!origin) {
+        return callback(null, false);
+      }
+
+      if (allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
-        callback(new Error("Not allowed by CORS"));
+        callback(null, false);
       }
     },
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "OPTIONS"],
     credentials: true,
     maxAge: 86400,
   })
 );
-app.use(express.json());
+
+// Limit JSON body size to prevent abuse
+app.use(express.json({ limit: "10kb" }));
 
 // Ensure data directory exists
 const dataDir = path.join(__dirname, "../data");
@@ -87,25 +156,31 @@ app.get("/api/sync-status", (req, res) => {
 });
 
 // Check if an address is connected to Satoshi
-app.get("/api/check/:address", async (req, res) => {
+app.get("/api/check/:address", addressCheckLimiter, async (req, res) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
   try {
     const { address } = req.params;
 
-    if (!address || typeof address !== "string") {
+    // Validate and sanitize the address
+    const sanitizedAddress = validateAndSanitizeAddress(address);
+
+    if (!sanitizedAddress) {
       clearTimeout(timeoutId);
-      return res.status(400).json({ error: "Invalid address parameter" });
+      return res.status(400).json({
+        error: "Invalid Bitcoin address",
+        message: "Please provide a valid Bitcoin address (Legacy, P2SH, or Bech32 format)",
+      });
     }
 
-    const result = await checkAddressConnection(address);
+    const result = await checkAddressConnection(sanitizedAddress);
 
     clearTimeout(timeoutId);
     res.json(result);
   } catch (error) {
     clearTimeout(timeoutId);
-    console.error("Error checking address:", error);
+    console.error("Error checking address:", error.message);
 
     if (error.name === "AbortError") {
       return res.status(503).json({
