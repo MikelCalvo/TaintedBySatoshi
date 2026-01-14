@@ -123,14 +123,36 @@ app.get("/api/check/:address", async (req, res) => {
   }
 });
 
-app.listen(PORT, async () => {
-  console.log(`Server running on port ${PORT}`);
-  
-  // Start background sync service
-  try {
-    await backgroundSyncService.start();
-  } catch (error) {
-    console.error("Failed to start background sync service:", error.message);
-    // Don't exit - server can still serve requests without sync
+// Global error handlers to prevent PM2 restarts
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit the process - log and continue
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  // Don't exit the process - log and continue
+  // Only exit on truly critical errors
+  if (error.code === 'EADDRINUSE') {
+    console.error('Port already in use. Exiting...');
+    process.exit(1);
   }
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/api/health`);
+  console.log(`Sync status: http://localhost:${PORT}/api/sync-status`);
+
+  // Start background sync service in next tick to avoid blocking
+  setImmediate(async () => {
+    try {
+      console.log("Starting background sync service...");
+      await backgroundSyncService.start();
+    } catch (error) {
+      console.error("Failed to start background sync service:", error.message);
+      console.error(error.stack);
+      // Don't exit - server can still serve requests without sync
+    }
+  });
 });

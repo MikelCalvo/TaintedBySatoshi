@@ -14,16 +14,24 @@ class DatabaseService {
     if (!this.db) {
       // Ensure the directory exists
       const fs = require("fs");
-      fs.mkdirSync(path.dirname(this.dbPath), { recursive: true });
+      if (!fs.existsSync(this.dbPath)) {
+        fs.mkdirSync(this.dbPath, { recursive: true });
+      }
 
       this.db = new Level(this.dbPath, {
         valueEncoding: "json",
+        createIfMissing: true,
       });
-      // Wait for the database to be ready
-      await new Promise((resolve, reject) => {
-        this.db.once("ready", resolve);
-        this.db.once("error", reject);
-      });
+
+      // Modern LevelDB opens automatically, just ensure it's open
+      try {
+        await this.db.open();
+      } catch (err) {
+        // If already open, ignore the error
+        if (err.code !== 'LEVEL_DATABASE_NOT_CLOSED') {
+          throw err;
+        }
+      }
 
       console.log(`Database initialized at: ${this.dbPath}`);
     }

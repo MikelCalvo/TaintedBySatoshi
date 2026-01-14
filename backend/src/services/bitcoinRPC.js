@@ -709,6 +709,15 @@ ${error.message}
         valueEncoding: "json",
         createIfMissing: true,
       });
+      // Ensure the database is actually open
+      try {
+        await this.dbStatus.instance.open();
+      } catch (err) {
+        // If already open, ignore the error
+        if (err.code !== 'LEVEL_DATABASE_NOT_CLOSED') {
+          throw err;
+        }
+      }
       this.dbStatus.isOpen = true;
     }
     return this.dbStatus.instance;

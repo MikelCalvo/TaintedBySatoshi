@@ -140,6 +140,177 @@ The application will be available at:
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:3001
 
+## 🔄 Production Deployment with PM2
+
+For production environments, use PM2 to manage both frontend and backend processes. PM2 provides:
+
+- Automatic restarts on crashes
+- Load balancing
+- Log management
+- Process monitoring
+- Zero-downtime reloads
+
+### Installation
+
+First, install PM2 globally:
+
+```bash
+npm install -g pm2
+```
+
+### Quick Start
+
+From the **root directory** of the project:
+
+```bash
+# Install all dependencies (backend + frontend)
+npm run install:all
+
+# Build the frontend for production
+npm run build:frontend
+
+# Start both frontend and backend with PM2
+npm run pm2:start
+
+# Check status
+npm run pm2:status
+
+# View logs (all processes)
+npm run pm2:logs
+
+# View backend logs only
+npm run pm2:logs:backend
+
+# View frontend logs only
+npm run pm2:logs:frontend
+```
+
+### Available PM2 Commands
+
+| Command | Description |
+|---------|-------------|
+| `npm run pm2:start` | Start both frontend and backend |
+| `npm run pm2:start:backend` | Start only backend |
+| `npm run pm2:start:frontend` | Start only frontend |
+| `npm run pm2:stop` | Stop both processes |
+| `npm run pm2:restart` | Restart both processes |
+| `npm run pm2:restart:backend` | Restart backend only |
+| `npm run pm2:restart:frontend` | Restart frontend only (no rebuild) |
+| `npm run pm2:reload:frontend` | Rebuild and restart frontend |
+| `npm run pm2:delete` | Remove all processes from PM2 |
+| `npm run pm2:logs` | View logs from all processes |
+| `npm run pm2:logs:backend` | View backend logs |
+| `npm run pm2:logs:frontend` | View frontend logs |
+| `npm run pm2:status` | View process status |
+| `npm run pm2:monit` | Real-time monitoring dashboard |
+
+### Deployment Commands
+
+| Command | Description |
+|---------|-------------|
+| `npm run deploy:frontend` | Rebuild frontend and restart (use after .env changes) |
+| `npm run deploy:backend` | Restart backend (applies .env changes) |
+| `npm run deploy:all` | Rebuild frontend and restart both |
+| `npm run build:frontend` | Build frontend only (without restarting) |
+| `npm run install:all` | Install dependencies for backend and frontend |
+
+### PM2 Direct Commands
+
+You can also use PM2 commands directly:
+
+```bash
+# View detailed logs
+pm2 logs TaintedBySatoshi_backend --lines 100
+pm2 logs TaintedBySatoshi_frontend --lines 100
+
+# Monitor in real-time
+pm2 monit
+
+# Restart with zero downtime
+pm2 reload ecosystem.config.js
+
+# Save PM2 process list (persist across reboots)
+pm2 save
+
+# Setup PM2 to start on system boot
+pm2 startup
+```
+
+### Background Synchronization
+
+When running with PM2, the backend automatically:
+
+- **Starts immediately** and serves API requests
+- **Syncs in background** processing blocks in chunks of 100
+- **Adapts sync speed** based on how far behind:
+  - Very behind (>1000 blocks): every 5 seconds
+  - Behind (>100 blocks): every 30 seconds
+  - Almost caught up (1-100 blocks): every 2 minutes
+  - Fully synced: checks every 10 minutes
+
+Monitor sync progress:
+
+```bash
+# Check sync status
+curl http://localhost:3001/api/sync-status
+
+# Watch logs in real-time
+npm run pm2:logs:backend
+```
+
+You no longer need to run `npm run update-satoshi-data` manually - everything syncs automatically in the background!
+
+### Updating Environment Variables
+
+**IMPORTANT**: Frontend and backend handle environment variables differently:
+
+#### Backend Environment Variables
+
+Backend loads `.env` at runtime, so changes take effect immediately:
+
+```bash
+# Edit backend/.env
+nano backend/.env
+
+# Restart backend to apply changes
+npm run deploy:backend
+```
+
+#### Frontend Environment Variables
+
+**Frontend compiles environment variables into the build** (they become hardcoded in JavaScript). After changing `frontend/.env`, you **must rebuild**:
+
+```bash
+# Edit frontend/.env
+nano frontend/.env
+
+# REQUIRED: Rebuild and restart to apply changes
+npm run deploy:frontend
+```
+
+**Why?** Next.js `NEXT_PUBLIC_*` variables are replaced at build time for security and performance. Simply restarting PM2 won't pick up new values - you must rebuild.
+
+**Common mistake:**
+```bash
+# ❌ This WON'T update frontend env vars
+nano frontend/.env
+npm run pm2:restart:frontend
+
+# ✅ This WILL update frontend env vars
+nano frontend/.env
+npm run deploy:frontend
+```
+
+### Environment Configuration
+
+Make sure your `.env` files are properly configured in both `backend/` and `frontend/` directories before starting with PM2.
+
+The PM2 configuration (`ecosystem.config.js`) automatically:
+- Loads environment variables from `.env` files
+- Manages memory limits (8GB for backend, 2GB for frontend)
+- Handles automatic restarts
+- Stores logs in `backend/logs/` and `frontend/logs/`
+
 ## 🔬 Patoshi Pattern Analysis
 
 This project uses **verified Patoshi blocks** to identify addresses belonging to Satoshi Nakamoto.

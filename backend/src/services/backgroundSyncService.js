@@ -70,13 +70,29 @@ class BackgroundSyncService {
       return;
     }
 
-    // Run initialization steps if needed
+    // Run initialization steps with timeout
     try {
-      await this.ensureInitialized();
+      // Timeout after 10 seconds to not block startup
+      await Promise.race([
+        this.ensureInitialized(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Initialization timeout - continuing in background")), 10000)
+        )
+      ]);
     } catch (error) {
-      console.error("Failed to initialize database:", error.message);
-      this.isRunning = false;
-      return;
+      if (error.message.includes("timeout")) {
+        console.log("⚠️  Initialization taking longer than expected, continuing in background...");
+        // Continue initialization in background
+        setImmediate(() => {
+          this.ensureInitialized().catch(err => {
+            console.error("Background initialization failed:", err.message);
+          });
+        });
+      } else {
+        console.error("Failed to initialize database:", error.message);
+        this.isRunning = false;
+        return;
+      }
     }
 
     console.log(`Background sync service started`);
@@ -203,99 +219,131 @@ class BackgroundSyncService {
   }
 
   async ensureInitialized() {
-    const satoshiAddressesPath = path.join(__dirname, "../../data/satoshiAddresses.js");
-    const DB_PATH = process.env.DB_PATH || path.join(__dirname, "../../data");
-    
-    // Ensure data directory exists
-    if (!fs.existsSync(DB_PATH)) {
-      fs.mkdirSync(DB_PATH, { recursive: true });
-    }
-
-    // Step 1: Check and extract Patoshi addresses if needed
-    if (!fs.existsSync(satoshiAddressesPath)) {
-      console.log("\n⚠️  Patoshi addresses not found.");
-      console.log("📥 Extracting Patoshi addresses automatically (this may take 25-30 minutes)...\n");
-
-      const { extractPatoshiAddresses } = require("../scripts/extractPatoshiAddresses");
-      const result = await extractPatoshiAddresses();
-
-      console.log(`\n✅ Extracted ${result.count} addresses`);
-      console.log(`✓ Continuing with initialization...\n`);
-
-      // Clear require cache so we can load the new file
-      delete require.cache[require.resolve(satoshiAddressesPath)];
-    }
-
-    // Load addresses
-    if (!loadSatoshiAddresses()) {
-      throw new Error("Failed to load Satoshi addresses after extraction");
-    }
-
-    if (SATOSHI_ADDRESSES.length === 0) {
-      throw new Error("No Satoshi addresses found in satoshiAddresses.js");
-    }
-
-    // Step 2: Initialize main database and Satoshi addresses
-    const db = await dbService.init();
-    
-    // Check if Satoshi addresses are initialized in main DB
-    let needsSatoshiInit = false;
     try {
-      // Check if at least one Satoshi address exists in DB
-      const testAddress = SATOSHI_ADDRESSES[0];
-      await db.get(`tainted:${testAddress}`);
-    } catch (err) {
-      needsSatoshiInit = true;
-    }
+      console.log("[Init] Step 1: Checking data directory...");
+      const satoshiAddressesPath = path.join(__dirname, "../../data/satoshiAddresses.js");
+      const DB_PATH = process.env.DB_PATH || path.join(__dirname, "../../data");
 
-    if (needsSatoshiInit) {
-      console.log("Initializing Satoshi addresses in database...");
-      const taintedBatch = db.batch();
-      for (const address of SATOSHI_ADDRESSES) {
-        taintedBatch.put(`tainted:${address}`, {
-          txHash: null,
-          originalSatoshiAddress: address,
-          amount: 0,
-          degree: 0,
-          path: [],
-          lastUpdated: Date.now(),
-        });
+      // Ensure data directory exists
+      if (!fs.existsSync(DB_PATH)) {
+        fs.mkdirSync(DB_PATH, { recursive: true });
       }
-      await taintedBatch.write();
-      console.log(`✓ Initialized ${SATOSHI_ADDRESSES.length.toLocaleString()} Satoshi addresses\n`);
-    }
 
-    // Step 3: Initialize coinbase outputs in scan_progress DB
-    const scanDb = new Level(path.join(DB_PATH, "scan_progress"), {
-      valueEncoding: "json",
-      createIfMissing: true,
-    });
-    await scanDb.open();
+      // Step 1: Check and extract Patoshi addresses if needed
+      if (!fs.existsSync(satoshiAddressesPath)) {
+        console.log("\n⚠️  Patoshi addresses not found.");
+        console.log("📥 This will be extracted in background. Server will continue serving requests.\n");
 
-    let needsCoinbaseInit = false;
-    try {
-      await scanDb.get("satoshi_coinbase_initialized");
-    } catch (err) {
-      needsCoinbaseInit = true;
-    }
-
-    if (needsCoinbaseInit) {
-      console.log("🔍 Initializing Satoshi coinbase outputs in background...");
-      console.log(`   This is a one-time process that may take 25-30 minutes.`);
-      console.log(`   The server will continue serving requests.\n`);
-
-      // Initialize coinbase outputs in background (non-blocking)
-      await scanDb.close();
-      setImmediate(() => {
-        this.initializeCoinbaseOutputs().catch((err) => {
-          console.error("Error initializing coinbase outputs:", err.message);
+        // Extract addresses in background to not block startup
+        setImmediate(async () => {
+          try {
+            const { extractPatoshiAddresses } = require("../scripts/extractPatoshiAddresses");
+            await extractPatoshiAddresses();
+            console.log("✓ Patoshi addresses extracted successfully");
+            // Trigger a reload of the sync service
+            loadSatoshiAddresses();
+          } catch (err) {
+            console.error("Failed to extract Patoshi addresses:", err.message);
+          }
         });
-      });
-    } else {
-      await scanDb.close();
-    }
 
-    // The continuous sync loop will automatically process any pending blocks
+        // For now, use empty array and let background extraction finish
+        console.log("[Init] Continuing without addresses for now...");
+        return;
+      }
+
+      console.log("[Init] Step 2: Loading Satoshi addresses...");
+      // Load addresses
+      if (!loadSatoshiAddresses()) {
+        throw new Error("Failed to load Satoshi addresses");
+      }
+
+      if (SATOSHI_ADDRESSES.length === 0) {
+        throw new Error("No Satoshi addresses found in satoshiAddresses.js");
+      }
+      console.log(`[Init] Loaded ${SATOSHI_ADDRESSES.length.toLocaleString()} Satoshi addresses`);
+
+      console.log("[Init] Step 3: Initializing main database...");
+      // Step 2: Initialize main database and Satoshi addresses
+      const db = await dbService.init();
+      console.log("[Init] Main database ready");
+
+      console.log("[Init] Step 4: Scheduling address initialization check...");
+      // Check and initialize addresses in background (don't block)
+      setImmediate(async () => {
+        try {
+          const db = await dbService.init();
+          // Quick check if addresses need initialization
+          let needsInit = false;
+          try {
+            const testAddress = SATOSHI_ADDRESSES[0];
+            await db.get(`tainted:${testAddress}`);
+            console.log("[Init] Satoshi addresses already initialized");
+          } catch (err) {
+            needsInit = true;
+          }
+
+          if (needsInit) {
+            console.log("[Init] Initializing Satoshi addresses...");
+            const taintedBatch = db.batch();
+            for (const address of SATOSHI_ADDRESSES) {
+              taintedBatch.put(`tainted:${address}`, {
+                txHash: null,
+                originalSatoshiAddress: address,
+                amount: 0,
+                degree: 0,
+                path: [],
+                lastUpdated: Date.now(),
+              });
+            }
+            await taintedBatch.write();
+            console.log(`✓ Initialized ${SATOSHI_ADDRESSES.length.toLocaleString()} Satoshi addresses`);
+          }
+        } catch (err) {
+          console.error("Failed to initialize Satoshi addresses:", err.message);
+        }
+      });
+
+      console.log("[Init] Step 5: Scheduling coinbase initialization check...");
+      // Check coinbase initialization completely in background
+      setImmediate(async () => {
+        try {
+          const scanDb = new Level(path.join(DB_PATH, "scan_progress"), {
+            valueEncoding: "json",
+            createIfMissing: true,
+          });
+          await scanDb.open();
+
+          let needsCoinbaseInit = false;
+          try {
+            await scanDb.get("satoshi_coinbase_initialized");
+            console.log("[Init] Coinbase outputs already initialized");
+          } catch (err) {
+            needsCoinbaseInit = true;
+            console.log("[Init] Coinbase outputs need initialization");
+          }
+
+          await scanDb.close();
+
+          if (needsCoinbaseInit) {
+            console.log("🔍 Initializing Satoshi coinbase outputs in background...");
+            console.log(`   This is a one-time process that may take 25-30 minutes.`);
+            console.log(`   The server will continue serving requests.\n`);
+
+            // Initialize coinbase outputs
+            await this.initializeCoinbaseOutputs();
+          }
+        } catch (err) {
+          console.error("Error checking coinbase initialization:", err.message);
+        }
+      });
+
+      console.log("[Init] Initialization checks completed");
+    } catch (error) {
+      console.error("[Init] Error during initialization:", error.message);
+      console.error(error.stack);
+      throw error;
+    }
   }
 
   async stop() {

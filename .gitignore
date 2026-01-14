@@ -36,4 +36,5 @@ backend/logs/
 frontend/.next/
 frontend/out/
 frontend/build/
-frontend/.env 
+frontend/.env
+frontend/logs/
