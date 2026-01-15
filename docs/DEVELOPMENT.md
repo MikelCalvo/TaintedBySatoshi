@@ -1,4 +1,4 @@
-# Development Guide
+# 🫟 Development Guide
 
 Local development setup and available scripts.
 

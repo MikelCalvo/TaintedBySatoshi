@@ -1,4 +1,4 @@
-# Patoshi Pattern Analysis
+# 🫟 Patoshi Pattern Analysis
 
 Technical background on how TaintedBySatoshi identifies Satoshi Nakamoto's addresses.
 

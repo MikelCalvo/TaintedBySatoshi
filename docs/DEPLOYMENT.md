@@ -1,4 +1,4 @@
-# Production Deployment
+# 🫟 Production Deployment
 
 Guide for deploying TaintedBySatoshi in production using PM2.
 

@@ -1,4 +1,4 @@
-# Tainted By Satoshi
+# 🫟 Tainted By Satoshi
 
 Web application to check if a Bitcoin address has any connection to Satoshi Nakamoto's wallets through transaction history.
 

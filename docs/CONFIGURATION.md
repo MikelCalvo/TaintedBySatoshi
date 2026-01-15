@@ -1,4 +1,4 @@
-# Configuration Reference
+# 🫟 Configuration Reference
 
 All environment variables for TaintedBySatoshi.
 
