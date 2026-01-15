@@ -76,6 +76,7 @@ Create `frontend/.env` with these variables:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `NEXT_PUBLIC_API_URL` | Backend API URL | `http://localhost:3001` |
+| `NEXT_PUBLIC_SITE_URL` | Public site URL (for SEO) | `https://taintedbysatoshi.com` |
 | `NEXT_PUBLIC_DONATION_ADDRESS` | Bitcoin donation address | - |
 | `NEXT_PUBLIC_LIGHTNING_ADDRESS` | Lightning address for donations | - |
 | `NEXT_PUBLIC_REPOSITORY_URL` | GitHub repository URL | - |

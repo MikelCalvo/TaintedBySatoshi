@@ -1,6 +1,6 @@
 import { useRouter } from "next/router";
-import Head from "next/head";
 import NextLink from "next/link";
+import SEO from "../../components/SEO";
 import {
   Container,
   Box,
@@ -261,13 +261,11 @@ export default function AddressPage({ address, initialLoad }) {
 
   return (
     <>
-      <Head>
-        <title>{address} - Tainted By Satoshi</title>
-        <meta
-          name="description"
-          content={`Check if Bitcoin address ${address} has any connection to Satoshi Nakamoto's wallets`}
-        />
-      </Head>
+      <SEO
+        title={address}
+        description={`Check if Bitcoin address ${address} has any connection to Satoshi Nakamoto's wallets through transaction history.`}
+        path={`/address/${address}`}
+      />
 
       <Container maxWidth="lg" sx={{ py: 4 }}>
         <Stack spacing={4}>

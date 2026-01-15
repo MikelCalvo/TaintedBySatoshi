@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import Head from "next/head";
 import {
   Container,
   Box,
@@ -24,6 +23,7 @@ import VisibilityIcon from "@mui/icons-material/Visibility";
 import PeopleIcon from "@mui/icons-material/People";
 import TrendingUpIcon from "@mui/icons-material/TrendingUp";
 import LanguageIcon from "@mui/icons-material/Language";
+import SEO from "../components/SEO";
 
 const REFRESH_INTERVAL = 30;
 
@@ -106,10 +106,11 @@ export default function Stats() {
 
   return (
     <>
-      <Head>
-        <title>Analytics - Tainted By Satoshi</title>
-        <meta name="description" content="Public analytics and statistics" />
-      </Head>
+      <SEO
+        title="Public Analytics"
+        description="Open source, privacy-respecting analytics. View page views, unique visitors, and traffic sources."
+        path="/stats"
+      />
 
       <Container maxWidth="lg" sx={{ py: 6 }}>
         <Box sx={{ mb: 4 }}>

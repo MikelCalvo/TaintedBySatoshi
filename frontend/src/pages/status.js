@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import Head from "next/head";
 import {
   Container,
   Box,
@@ -12,6 +11,7 @@ import {
   Link,
 } from "@mui/material";
 import NextLink from "next/link";
+import SEO from "../components/SEO";
 
 const REFRESH_INTERVAL = 5;
 
@@ -95,13 +95,11 @@ export default function Status() {
 
   return (
     <>
-      <Head>
-        <title>Sync Status - Tainted By Satoshi</title>
-        <meta
-          name="description"
-          content="Real-time synchronization status of the Tainted By Satoshi service"
-        />
-      </Head>
+      <SEO
+        title="Sync Status"
+        description="Real-time blockchain synchronization status. Monitor the progress of scanning transactions connected to Satoshi's wallets."
+        path="/status"
+      />
 
       <Container maxWidth="md" sx={{ py: 6 }}>
         <Box sx={{ mb: 4 }}>

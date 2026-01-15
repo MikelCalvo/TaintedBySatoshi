@@ -1,18 +1,16 @@
-import Head from "next/head";
 import { Container, Box, Typography } from "@mui/material";
 import AddressSearchForm from "../components/AddressSearchForm";
 import FamousWalletsSuggestions from "../components/FamousWalletsSuggestions";
+import SEO from "../components/SEO";
 
 export default function Home() {
   return (
     <>
-      <Head>
-        <title>Tainted By Satoshi - Check Bitcoin Address Connections</title>
-        <meta
-          name="description"
-          content="Check if a Bitcoin address has any connection to Satoshi Nakamoto's wallets"
-        />
-      </Head>
+      <SEO
+        title="Check Bitcoin Address Connections"
+        description="Check if a Bitcoin address has any connection to Satoshi Nakamoto's wallets through transaction history. Track direct and indirect connections."
+        path="/"
+      />
 
       <Container maxWidth="md" sx={{ py: 10 }}>
         <Box sx={{ textAlign: "center", mb: 6 }}>
