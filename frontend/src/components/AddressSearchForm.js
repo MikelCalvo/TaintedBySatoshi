@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   TextField,
   Button,
@@ -7,16 +7,43 @@ import {
   Box,
   Typography,
   CircularProgress,
+  Link,
 } from "@mui/material";
 import { Search as SearchIcon, Clear as ClearIcon } from "@mui/icons-material";
 import { isValidBitcoinAddress } from "../utils/validation";
 import { useRouter } from "next/router";
+import NextLink from "next/link";
 
 export default function AddressSearchForm({ showNote = false }) {
   const [address, setAddress] = useState("");
   const [isValidating, setIsValidating] = useState(false);
   const [error, setError] = useState("");
+  const [syncStatus, setSyncStatus] = useState(null);
   const router = useRouter();
+
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+
+  useEffect(() => {
+    if (!showNote) return;
+
+    const fetchSyncStatus = async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/sync-status`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setSyncStatus(data);
+        }
+      } catch {
+        // Silently fail - sync status is informational
+      }
+    };
+
+    fetchSyncStatus();
+    const interval = setInterval(fetchSyncStatus, 30000);
+    return () => clearInterval(interval);
+  }, [showNote, API_URL]);
 
   const retryWithBackoff = async (fn, retries = 2) => {
     for (let i = 0; i < retries; i++) {
@@ -64,9 +91,6 @@ export default function AddressSearchForm({ showNote = false }) {
         setIsValidating(false);
         return;
       }
-
-      const API_URL =
-        process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
       try {
         await retryWithBackoff(async () => {
@@ -159,12 +183,44 @@ export default function AddressSearchForm({ showNote = false }) {
       </Button>
 
       {showNote && (
-        <Typography variant="body2" color="text.secondary" align="center">
-          Note: This tool only tracks outgoing transactions from Satoshi's known
-          addresses to avoid false positives.
-          <br />
-          New transactions could take up to 24 hours to appear in the results.
-        </Typography>
+        <>
+          <Typography variant="body2" color="text.secondary" align="center">
+            {!syncStatus ? (
+              <>
+                Loading sync status...{" "}
+                <Link component={NextLink} href="/status" underline="hover">
+                  View details
+                </Link>
+              </>
+            ) : syncStatus.lastProcessedBlock === null ? (
+              <>
+                Initializing sync service...{" "}
+                <Link component={NextLink} href="/status" underline="hover">
+                  View details
+                </Link>
+              </>
+            ) : (
+              <>
+                Synced to block{" "}
+                {syncStatus.lastProcessedBlock.toLocaleString()} /{" "}
+                {syncStatus.currentHeight?.toLocaleString() ?? "..."}{" "}
+                ({syncStatus.progress}){" "}
+                <Link component={NextLink} href="/status" underline="hover">
+                  View details
+                </Link>
+              </>
+            )}
+          </Typography>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            align="center"
+            sx={{ mt: 2 }}
+          >
+            Note: This tool only tracks outgoing transactions from Satoshi{"'"}s
+            known addresses to avoid false positives.
+          </Typography>
+        </>
       )}
     </Box>
   );

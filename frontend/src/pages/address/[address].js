@@ -1,6 +1,6 @@
 import { useRouter } from "next/router";
 import Head from "next/head";
-import Link from "next/link";
+import NextLink from "next/link";
 import {
   Container,
   Box,
@@ -15,8 +15,9 @@ import {
   Divider,
   Stack,
   CircularProgress,
+  Link,
 } from "@mui/material";
-import { ArrowBack, ArrowForward } from "@mui/icons-material";
+import { ArrowBack, ArrowForward, Info } from "@mui/icons-material";
 import AddressSearchForm from "../../components/AddressSearchForm";
 import { useState, useEffect } from "react";
 import FamousWalletsSuggestions from "../../components/FamousWalletsSuggestions";
@@ -78,7 +79,7 @@ const ConnectionPath = ({ path }) => (
               <Typography variant="body2" color="text.secondary">
                 From:
               </Typography>
-              <Link href={`/address/${step.from}`} passHref>
+              <NextLink href={`/address/${step.from}`} passHref>
                 <Typography
                   component="a"
                   variant="body2"
@@ -101,7 +102,7 @@ const ConnectionPath = ({ path }) => (
                     />
                   )}
                 </Typography>
-              </Link>
+              </NextLink>
             </Box>
 
             <ArrowForward color="action" />
@@ -110,7 +111,7 @@ const ConnectionPath = ({ path }) => (
               <Typography variant="body2" color="text.secondary">
                 To:
               </Typography>
-              <Link href={`/address/${step.to}`} passHref>
+              <NextLink href={`/address/${step.to}`} passHref>
                 <Typography
                   component="a"
                   variant="body2"
@@ -125,7 +126,7 @@ const ConnectionPath = ({ path }) => (
                 >
                   {step.to}
                 </Typography>
-              </Link>
+              </NextLink>
             </Box>
 
             <Typography variant="caption" color="text.secondary">
@@ -142,27 +143,39 @@ export default function AddressPage({ address, initialLoad }) {
   const [isLoading, setIsLoading] = useState(initialLoad);
   const [error, setError] = useState(null);
   const [data, setData] = useState(null);
+  const [syncStatus, setSyncStatus] = useState(null);
   const router = useRouter();
 
   useEffect(() => {
+    const retryWithBackoff = async (fn, retries = 2) => {
+      for (let i = 0; i < retries; i++) {
+        try {
+          return await fn();
+        } catch (error) {
+          if (i === retries - 1) throw error;
+          await new Promise((resolve) =>
+            setTimeout(resolve, (i + 1) * 1000)
+          );
+        }
+      }
+    };
+
+    const fetchSyncStatus = async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/sync-status`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setSyncStatus(data);
+        }
+      } catch {
+        // Silently fail - sync status is informational
+      }
+    };
+
     const fetchData = async () => {
       try {
-        const API_URL =
-          process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-
-        const retryWithBackoff = async (fn, retries = 2) => {
-          for (let i = 0; i < retries; i++) {
-            try {
-              return await fn();
-            } catch (error) {
-              if (i === retries - 1) throw error;
-              await new Promise((resolve) =>
-                setTimeout(resolve, (i + 1) * 1000)
-              );
-            }
-          }
-        };
-
         const result = await retryWithBackoff(async () => {
           // Encode address to prevent URL injection
           const encodedAddress = encodeURIComponent(address);
@@ -194,6 +207,7 @@ export default function AddressPage({ address, initialLoad }) {
 
     if (initialLoad) {
       fetchData();
+      fetchSyncStatus();
     }
   }, [address, initialLoad]);
 
@@ -201,11 +215,11 @@ export default function AddressPage({ address, initialLoad }) {
     return (
       <Container maxWidth="md" sx={{ py: 10 }}>
         <Box>
-          <Link href="/" passHref>
+          <NextLink href="/" passHref>
             <Button startIcon={<ArrowBack />} sx={{ mb: 2 }}>
               Back
             </Button>
-          </Link>
+          </NextLink>
           <Typography variant="h4" gutterBottom>
             Address Details
           </Typography>
@@ -234,7 +248,7 @@ export default function AddressPage({ address, initialLoad }) {
           {error.description}
         </Alert>
         <Button
-          component={Link}
+          component={NextLink}
           href="/"
           startIcon={<ArrowBack />}
           sx={{ mt: 2 }}
@@ -258,11 +272,11 @@ export default function AddressPage({ address, initialLoad }) {
       <Container maxWidth="lg" sx={{ py: 4 }}>
         <Stack spacing={4}>
           <Box>
-            <Link href="/" passHref>
+            <NextLink href="/" passHref>
               <Button startIcon={<ArrowBack />} sx={{ mb: 2 }}>
                 Back
               </Button>
-            </Link>
+            </NextLink>
             <Typography variant="h4" gutterBottom>
               Address Details
             </Typography>
@@ -270,6 +284,31 @@ export default function AddressPage({ address, initialLoad }) {
               {address}
             </Typography>
           </Box>
+
+          {syncStatus && syncStatus.lastProcessedBlock === null && (
+            <Alert severity="warning" icon={<Info />}>
+              <AlertTitle>Service initializing</AlertTitle>
+              The sync service is starting up and reading the local database.
+              Results may be incomplete. Please wait a moment and refresh.{" "}
+              <Link component={NextLink} href="/status" underline="hover">
+                View sync status
+              </Link>
+            </Alert>
+          )}
+
+          {syncStatus && syncStatus.lastProcessedBlock !== null && syncStatus.blocksBehind > 0 && (
+            <Alert severity="info" icon={<Info />}>
+              <AlertTitle>Sync in progress</AlertTitle>
+              The database is currently synced up to block{" "}
+              {syncStatus.lastProcessedBlock.toLocaleString()} of{" "}
+              {syncStatus.currentHeight?.toLocaleString()} ({syncStatus.progress}
+              ). If you are looking for a recent transaction, please check again
+              later.{" "}
+              <Link component={NextLink} href="/status" underline="hover">
+                View sync status
+              </Link>
+            </Alert>
+          )}
 
           {error && (
             <Alert

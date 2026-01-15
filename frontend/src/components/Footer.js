@@ -4,6 +4,7 @@ import Link from "@mui/material/Link";
 import GitHubIcon from "@mui/icons-material/GitHub";
 import BitcoinIcon from "@mui/icons-material/CurrencyBitcoin";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import SyncIcon from "@mui/icons-material/Sync";
 import Modal from "@mui/material/Modal";
 import { useState, useCallback } from "react";
 import { QRCodeSVG } from "qrcode.react";
@@ -14,6 +15,7 @@ import CheckIcon from "@mui/icons-material/Check";
 import Tabs from "@mui/material/Tabs";
 import Tab from "@mui/material/Tab";
 import FlashOnIcon from "@mui/icons-material/FlashOn";
+import NextLink from "next/link";
 
 export function Footer() {
   const [showQR, setShowQR] = useState(false);
@@ -122,6 +124,21 @@ export function Footer() {
               </Link>
             </>
           )}
+          {" • "}
+          <Link
+            component={NextLink}
+            href="/status"
+            color="primary"
+            underline="none"
+            sx={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 0.5,
+            }}
+          >
+            <SyncIcon sx={{ fontSize: "inherit" }} />
+            Sync Status
+          </Link>
           {(donationAddress || lightningAddress) && (
             <>
               {" • "}

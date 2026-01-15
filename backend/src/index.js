@@ -48,6 +48,10 @@ const generalLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => {
+    // Exclude lightweight status endpoints from rate limiting
+    return req.path === "/api/sync-status" || req.path === "/api/health";
+  },
 });
 
 // Stricter rate limiting for address check endpoint

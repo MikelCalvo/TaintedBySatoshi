@@ -46,6 +46,9 @@ class BackgroundSyncService {
     this.parentTaintingCache = new Map();
     this.batchIsValid = false;
     this.mainDb = null;
+
+    // Database ready flag
+    this.dbReady = false;
   }
 
   async start() {
@@ -262,6 +265,7 @@ class BackgroundSyncService {
       console.log("[Init] Step 3: Initializing main database...");
       // Step 2: Initialize main database and Satoshi addresses
       const db = await dbService.init();
+      this.dbReady = true;
       console.log("[Init] Main database ready");
 
       console.log("[Init] Step 4: Scheduling address initialization check...");
@@ -354,6 +358,7 @@ class BackgroundSyncService {
     await this.flushBatch();
     this.batchIsValid = false;
     this.mainDb = null;
+    this.dbReady = false;
 
     console.log("Background sync service stopped");
   }
@@ -361,6 +366,12 @@ class BackgroundSyncService {
   async checkAndSync() {
     if (this.isSyncing) {
       return; // Already syncing, skip this check
+    }
+
+    // Wait for database to be ready
+    if (!this.dbReady) {
+      console.log("[Background Sync] Waiting for database initialization...");
+      return;
     }
 
     try {
