@@ -5,6 +5,7 @@ const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const { checkAddressConnection } = require("./services/bitcoinService");
 const backgroundSyncService = require("./services/backgroundSyncService");
+const analyticsService = require("./services/analyticsService");
 const { validateAndSanitizeAddress } = require("./utils/validation");
 const fs = require("fs");
 const path = require("path");
@@ -50,7 +51,9 @@ const generalLimiter = rateLimit({
   legacyHeaders: false,
   skip: (req) => {
     // Exclude lightweight status endpoints from rate limiting
-    return req.path === "/api/sync-status" || req.path === "/api/health";
+    return req.path === "/api/sync-status" ||
+           req.path === "/api/health" ||
+           req.path === "/api/analytics/stats";
   },
 });
 
@@ -63,6 +66,15 @@ const addressCheckLimiter = rateLimit({
     message: "Please wait before checking more addresses",
     retryAfter: "1 minute",
   },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Rate limiting for analytics tracking (more permissive)
+const analyticsTrackLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 60, // 60 requests per minute
+  message: { error: "Too many tracking requests" },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -95,7 +107,7 @@ app.use(
         callback(null, false);
       }
     },
-    methods: ["GET", "OPTIONS"],
+    methods: ["GET", "POST", "OPTIONS"],
     credentials: true,
     maxAge: 86400,
   })
@@ -156,6 +168,93 @@ app.get("/api/sync-status", (req, res) => {
           ? error.message
           : "Internal server error",
     });
+  }
+});
+
+// === ANALYTICS ENDPOINTS ===
+
+// Track page views and events
+app.post("/api/analytics/track", analyticsTrackLimiter, async (req, res) => {
+  try {
+    // Validate request body exists and is an object
+    if (!req.body || typeof req.body !== "object") {
+      return res.status(400).json({ error: "Invalid request body" });
+    }
+
+    const { type, path, referrer } = req.body;
+
+    // Basic type validation (detailed sanitization happens in service)
+    if (path !== undefined && typeof path !== "string") {
+      return res.status(400).json({ error: "Invalid path" });
+    }
+    if (referrer !== undefined && typeof referrer !== "string") {
+      return res.status(400).json({ error: "Invalid referrer" });
+    }
+    if (type !== undefined && typeof type !== "string") {
+      return res.status(400).json({ error: "Invalid type" });
+    }
+
+    // Reject oversized payloads (defense in depth)
+    if ((path && path.length > 2000) || (referrer && referrer.length > 2000)) {
+      return res.status(400).json({ error: "Payload too large" });
+    }
+
+    // Get IP safely (considering proxy)
+    const ip =
+      req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+      req.socket.remoteAddress;
+
+    await analyticsService.trackEvent({
+      type: type || "pageview",
+      path,
+      referrer,
+      userAgent: req.headers["user-agent"],
+      ip,
+    });
+
+    res.status(204).send(); // No content - fast response
+  } catch (error) {
+    console.error("[Analytics] Track error:", error.message);
+    res.status(500).json({ error: "Failed to track event" });
+  }
+});
+
+// Get public analytics stats (excluded from rate limiting like sync-status)
+app.get("/api/analytics/stats", async (req, res) => {
+  try {
+    // Validate days parameter
+    let days = parseInt(req.query.days);
+    if (isNaN(days) || days < 1) {
+      days = 30;
+    }
+    // Max limit enforced in service, but add sanity check here too
+    if (days > 100000) {
+      days = 36500;
+    }
+
+    const stats = await analyticsService.getStats({ days });
+
+    if (!stats || stats.enabled === false) {
+      return res.json({
+        error: "Analytics disabled",
+        enabled: false,
+      });
+    }
+
+    res.json(stats);
+  } catch (error) {
+    console.error("[Analytics] Stats error:", error.message);
+    res.status(500).json({ error: "Failed to get stats" });
+  }
+});
+
+// Analytics service status
+app.get("/api/analytics/status", async (req, res) => {
+  try {
+    const status = await analyticsService.getStatus();
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to get analytics status" });
   }
 });
 
@@ -232,6 +331,16 @@ app.listen(PORT, () => {
       console.error("Failed to start background sync service:", error.message);
       console.error(error.stack);
       // Don't exit - server can still serve requests without sync
+    }
+  });
+
+  // Start analytics service
+  setImmediate(async () => {
+    try {
+      await analyticsService.init();
+    } catch (error) {
+      console.error("Failed to start analytics service:", error.message);
+      // Don't exit - server can still serve requests without analytics
     }
   });
 });

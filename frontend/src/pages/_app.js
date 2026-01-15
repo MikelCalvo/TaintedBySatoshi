@@ -6,6 +6,7 @@ import theme from "../styles/theme";
 import { StyledEngineProvider } from "@mui/material/styles";
 import Box from "@mui/material/Box";
 import { Footer } from "../components/Footer";
+import { TrackingProvider } from "../contexts/TrackingContext";
 
 // Client-side cache, shared for the whole session of the user in the browser.
 const clientSideEmotionCache = createEmotionCache();
@@ -18,18 +19,20 @@ export default function MyApp(props) {
       <StyledEngineProvider injectFirst>
         <ThemeProvider theme={theme}>
           <CssBaseline />
-          <Box
-            sx={{
-              display: "flex",
-              flexDirection: "column",
-              minHeight: "100vh",
-            }}
-          >
-            <Box sx={{ flex: "1 0 auto" }}>
-              <Component {...pageProps} />
+          <TrackingProvider>
+            <Box
+              sx={{
+                display: "flex",
+                flexDirection: "column",
+                minHeight: "100vh",
+              }}
+            >
+              <Box sx={{ flex: "1 0 auto" }}>
+                <Component {...pageProps} />
+              </Box>
+              <Footer />
             </Box>
-            <Footer />
-          </Box>
+          </TrackingProvider>
         </ThemeProvider>
       </StyledEngineProvider>
     </CacheProvider>

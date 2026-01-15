@@ -11,6 +11,7 @@ A web application that allows you to check if a Bitcoin address has any connecti
 - Server-side rendered pages for better SEO and caching
 - Clean, responsive Material UI design
 - Real-time Bitcoin node integration
+- Built-in privacy-respecting analytics (open source)
 
 ## 🏗️ Tech Stack
 
@@ -450,6 +451,60 @@ Check if a Bitcoin address has any connection to Satoshi's wallets.
 }
 ```
 
+## 📊 Analytics
+
+The application includes a built-in, open source, privacy-respecting analytics system. All analytics data is stored locally and the stats page is publicly accessible.
+
+### Features
+
+- **Privacy-first**: No personal data collected, IPs are anonymized (hashed daily)
+- **No cookies**: Visitor identification uses anonymous daily hashes
+- **Local storage**: All data stored in separate LevelDB (`./data/analytics`)
+- **Public stats**: View analytics at `/stats`
+- **Configurable retention**: Keep data forever or set a limit
+
+### Public Stats Page
+
+Visit `/stats` to see:
+- Total page views and unique visitors (last 30 days)
+- Top pages visited
+- Traffic sources (referrers)
+- Device breakdown (desktop/mobile/bot)
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/analytics/track` | POST | Track page view or event |
+| `/api/analytics/stats` | GET | Get public statistics |
+| `/api/analytics/status` | GET | Analytics service status |
+
+### Configuration
+
+Analytics is enabled by default. To disable:
+
+```env
+ANALYTICS_ENABLED=false
+```
+
+Data retention (in `backend/.env`):
+
+```env
+# Keep data forever (default)
+ANALYTICS_RETENTION_DAYS=0
+
+# Or set a limit (e.g., 90 days)
+ANALYTICS_RETENTION_DAYS=90
+```
+
+### Data Storage
+
+Analytics uses a **separate database** from the main tainted transactions DB:
+- Main DB: `./data/satoshi-transactions`
+- Analytics DB: `./data/analytics`
+
+This separation ensures you can resync the blockchain without losing analytics data.
+
 ## 🤝 Contributing
 
 1. Fork the repository
@@ -554,6 +609,11 @@ Recommended hardware for optimal performance:
 | `BITCOIN_MAX_RETRIES`      | Maximum retry attempts                        | `5`         |
 | `BITCOIN_MEMORY_THRESHOLD` | Memory usage threshold for GC                 | `0.90`      |
 | `BITCOIN_BLOCK_TIMEOUT`    | Block processing timeout in milliseconds      | `300000`    |
+| `ANALYTICS_ENABLED`        | Enable/disable analytics tracking             | `true`      |
+| `ANALYTICS_DB_PATH`        | Path for analytics database (separate from main DB) | `./data/analytics` |
+| `ANALYTICS_BATCH_SIZE`     | Events to batch before writing to DB          | `100`       |
+| `ANALYTICS_FLUSH_INTERVAL` | Batch flush interval in milliseconds          | `10000`     |
+| `ANALYTICS_RETENTION_DAYS` | Days to keep data (0 = infinite)              | `0`         |
 
 ### Frontend Variables
 

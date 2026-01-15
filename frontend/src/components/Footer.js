@@ -5,6 +5,7 @@ import GitHubIcon from "@mui/icons-material/GitHub";
 import BitcoinIcon from "@mui/icons-material/CurrencyBitcoin";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import SyncIcon from "@mui/icons-material/Sync";
+import BarChartIcon from "@mui/icons-material/BarChart";
 import Modal from "@mui/material/Modal";
 import { useState, useCallback } from "react";
 import { QRCodeSVG } from "qrcode.react";
@@ -80,8 +81,7 @@ export function Footer() {
           },
         }}
       >
-        <Typography
-          variant="body2"
+        <Box
           sx={{
             textAlign: "center",
             color: "text.secondary",
@@ -94,72 +94,93 @@ export function Footer() {
             },
           }}
         >
-          Made by{" "}
-          <Link
-            href="https://mikelcalvo.net"
-            target="_blank"
-            rel="noopener noreferrer"
-            color="primary"
-            underline="none"
-          >
-            Mikel Calvo
-          </Link>
-          {repositoryUrl && (
-            <>
-              {" • "}
-              <Link
-                href={repositoryUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                color="primary"
-                underline="none"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 0.5,
-                }}
-              >
-                <GitHubIcon sx={{ fontSize: "inherit" }} />
-                Source Code
-              </Link>
-            </>
-          )}
-          {" • "}
-          <Link
-            component={NextLink}
-            href="/status"
-            color="primary"
-            underline="none"
-            sx={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 0.5,
-            }}
-          >
-            <SyncIcon sx={{ fontSize: "inherit" }} />
-            Sync Status
-          </Link>
-          {(donationAddress || lightningAddress) && (
-            <>
-              {" • "}
-              <Link
-                href="#"
-                color="primary"
-                underline="none"
-                onClick={handleDonateClick}
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 0.5,
-                  cursor: "pointer",
-                }}
-              >
-                <BitcoinIcon sx={{ fontSize: "inherit" }} />
-                Donate
-              </Link>
-            </>
-          )}
-        </Typography>
+          {/* First line: Sync Status and Analytics */}
+          <Typography variant="body2" sx={{ mb: 0.5 }}>
+            <Link
+              component={NextLink}
+              href="/status"
+              color="primary"
+              underline="none"
+              sx={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 0.5,
+              }}
+            >
+              <SyncIcon sx={{ fontSize: "inherit" }} />
+              Sync Status
+            </Link>
+            {" • "}
+            <Link
+              component={NextLink}
+              href="/stats"
+              color="primary"
+              underline="none"
+              sx={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 0.5,
+              }}
+            >
+              <BarChartIcon sx={{ fontSize: "inherit" }} />
+              Analytics
+            </Link>
+          </Typography>
+
+          {/* Second line: Made by, Source Code, Donate */}
+          <Typography variant="body2">
+            Made by{" "}
+            <Link
+              href="https://mikelcalvo.net"
+              target="_blank"
+              rel="noopener noreferrer"
+              color="primary"
+              underline="none"
+            >
+              Mikel Calvo
+            </Link>
+            {repositoryUrl && (
+              <>
+                {" • "}
+                <Link
+                  href={repositoryUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  color="primary"
+                  underline="none"
+                  sx={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 0.5,
+                  }}
+                >
+                  <GitHubIcon sx={{ fontSize: "inherit" }} />
+                  Source Code
+                </Link>
+              </>
+            )}
+            {(donationAddress || lightningAddress) && (
+              <>
+                {" • "}
+                <Link
+                  href="#"
+                  color="primary"
+                  underline="none"
+                  onClick={handleDonateClick}
+                  sx={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 0.5,
+                    cursor: "pointer",
+                  }}
+                >
+                  <BitcoinIcon sx={{ fontSize: "inherit" }} />
+                  Donate
+                </Link>
+              </>
+            )}
+          </Typography>
+        </Box>
       </Box>
 
       <Modal
