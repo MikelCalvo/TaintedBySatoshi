@@ -1,624 +1,144 @@
-# 🌟 Tainted By Satoshi
+# Tainted By Satoshi
 
-A web application that allows you to check if a Bitcoin address has any connection to Satoshi Nakamoto's known wallet addresses through transaction history. The application tracks both direct connections (addresses that received Bitcoin directly from Satoshi) and indirect connections through any number of transaction hops.
+Web application to check if a Bitcoin address has any connection to Satoshi Nakamoto's wallets through transaction history.
 
-## 🚀 Features
+## Features
 
-- Search any Bitcoin address
-- Check direct and indirect connections to Satoshi's wallets
-- Track transaction paths from Satoshi to target address
-- View detailed transaction information
-- Server-side rendered pages for better SEO and caching
-- Clean, responsive Material UI design
-- Real-time Bitcoin node integration
-- Built-in privacy-respecting analytics (open source)
+- Check direct and indirect connections to Satoshi's ~22,000 known addresses
+- Track transaction paths showing how Bitcoin flowed from Satoshi
+- Uses verified Patoshi pattern analysis (21,953 blocks)
+- Privacy-respecting analytics (no cookies, anonymous data)
+- Background blockchain synchronization
 
-## 🏗️ Tech Stack
+## Quick Start
 
-### Frontend
+### Prerequisites
 
-- **Framework**: Next.js 14
-- **UI Library**: Material-UI (MUI)
-- **State Management**: React Hooks
-- **HTTP Client**: Axios
-- **Bitcoin Tools**: bitcoinjs-lib
+- Node.js v18+
+- Bitcoin Core v22+ with `txindex=1` enabled
+- 10GB+ free disk space
 
-### Backend
-
-- **Runtime**: Node.js
-- **Framework**: Express
-- **Database**: LevelDB for caching and transaction data
-- **Bitcoin Integration**: Direct Bitcoin Core RPC
-- **Validation**: bitcoinjs-lib
-
-## 🛠️ Prerequisites
-
-- Node.js (v18 or higher)
-- npm or yarn
-- Bitcoin Core node (v22.0 or higher)
-- At least 10GB of free disk space for the database
-
-## 📦 Installation
-
-1. Clone the repository:
+### Installation
 
 ```bash
 git clone https://github.com/MikelCalvo/TaintedBySatoshi.git
 cd TaintedBySatoshi
+
+# Install dependencies
+cd backend && npm install
+cd ../frontend && npm install
 ```
 
-2. Install backend dependencies:
+### Configuration
 
-```bash
-cd backend
-npm install
-```
-
-3. Install frontend dependencies:
-
-```bash
-cd ../frontend
-npm install
-```
-
-4. Configure environment variables:
-
-Backend `.env`:
-
+**Backend** (`backend/.env`):
 ```env
-# Server Configuration
 PORT=3001
-NODE_ENV=development
-
-# Bitcoin Node Configuration
 BITCOIN_RPC_HOST=localhost
 BITCOIN_RPC_PORT=8332
-BITCOIN_RPC_USER=your_rpc_username
-BITCOIN_RPC_PASS=your_rpc_password
-BITCOIN_RPC_TIMEOUT=30000
-
-# Database Configuration
+BITCOIN_RPC_USER=your_username
+BITCOIN_RPC_PASS=your_password
 DB_PATH=./data/satoshi-transactions
-
-# Processing Configuration
-MAX_DEGREE=100                    # Maximum tinting degree to process
-BATCH_SIZE=250                   # Number of transactions to process in parallel
-CACHE_TTL=3600                   # Cache time-to-live in seconds
-UPDATE_INTERVAL=3600             # How often to update the database in seconds
-
-# Performance Tuning
-BITCOIN_BATCH_SIZE=250           # Number of blocks to process in one batch
-BITCOIN_MAX_PARALLEL=32          # Number of parallel RPC requests
-BITCOIN_CACHE_SIZE=50000         # Number of transactions to keep in memory
-BITCOIN_RETRY_DELAY=500          # Milliseconds to wait between retries
-BITCOIN_MAX_RETRIES=5            # Number of times to retry failed requests
-BITCOIN_MEMORY_THRESHOLD=0.90    # Memory usage threshold for GC
 ```
 
-Frontend `.env`:
-
+**Frontend** (`frontend/.env`):
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:3001
 ```
 
-## 🚀 Running the Application
-
-1. Start Bitcoin Core with RPC and txindex enabled:
+### Run Development
 
 ```bash
-bitcoind -server -rpcuser=your_username -rpcpassword=your_password -txindex=1
+# Terminal 1: Backend
+cd backend && npm run dev
+
+# Terminal 2: Frontend
+cd frontend && npm run dev
 ```
 
-2. Start the backend server:
+Access at http://localhost:3000
 
-```bash
-cd backend
-npm run dev
-```
+### Initialize Database
 
-3. Start the frontend development server:
-
-```bash
-cd frontend
-npm run dev
-```
-
-4. Initialize the Satoshi transaction database:
+First run requires building the taint database:
 
 ```bash
 cd backend
 npm run update-satoshi-data
 ```
 
-**Note:** The `update-satoshi-data` script automatically handles everything:
-- Extracts Patoshi addresses from 21,953 verified blocks if not already done (~25-30 minutes first time)
-- Includes Genesis block and early Satoshi addresses (blocks 0-2)
-- Scans the entire blockchain for tainted transactions
-- Updates the database with all connections
+This extracts ~22,000 Satoshi addresses and scans the blockchain for connections (takes several hours).
 
-The application will be available at:
+## Production
 
-- Frontend: http://localhost:3000
-- Backend API: http://localhost:3001
-
-## 🔄 Production Deployment with PM2
-
-For production environments, use PM2 to manage both frontend and backend processes. PM2 provides:
-
-- Automatic restarts on crashes
-- Load balancing
-- Log management
-- Process monitoring
-- Zero-downtime reloads
-
-### Installation
-
-First, install PM2 globally:
+Use PM2 for production deployment:
 
 ```bash
-npm install -g pm2
-```
-
-### Quick Start
-
-From the **root directory** of the project:
-
-```bash
-# Install all dependencies (backend + frontend)
+# From root directory
 npm run install:all
-
-# Build the frontend for production
 npm run build:frontend
-
-# Start both frontend and backend with PM2
 npm run pm2:start
-
-# Check status
-npm run pm2:status
-
-# View logs (all processes)
-npm run pm2:logs
-
-# View backend logs only
-npm run pm2:logs:backend
-
-# View frontend logs only
-npm run pm2:logs:frontend
 ```
 
-### Available PM2 Commands
+The backend auto-syncs new blocks in the background.
 
-| Command | Description |
-|---------|-------------|
-| `npm run pm2:start` | Start both frontend and backend |
-| `npm run pm2:start:backend` | Start only backend |
-| `npm run pm2:start:frontend` | Start only frontend |
-| `npm run pm2:stop` | Stop both processes |
-| `npm run pm2:restart` | Restart both processes |
-| `npm run pm2:restart:backend` | Restart backend only |
-| `npm run pm2:restart:frontend` | Restart frontend only (no rebuild) |
-| `npm run pm2:reload:frontend` | Rebuild and restart frontend |
-| `npm run pm2:delete` | Remove all processes from PM2 |
-| `npm run pm2:logs` | View logs from all processes |
-| `npm run pm2:logs:backend` | View backend logs |
-| `npm run pm2:logs:frontend` | View frontend logs |
-| `npm run pm2:status` | View process status |
-| `npm run pm2:monit` | Real-time monitoring dashboard |
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for full production setup.
 
-### Deployment Commands
+## API
 
-| Command | Description |
-|---------|-------------|
-| `npm run deploy:frontend` | Rebuild frontend and restart (use after .env changes) |
-| `npm run deploy:backend` | Restart backend (applies .env changes) |
-| `npm run deploy:all` | Rebuild frontend and restart both |
-| `npm run build:frontend` | Build frontend only (without restarting) |
-| `npm run install:all` | Install dependencies for backend and frontend |
+### `GET /api/check/:address`
 
-### PM2 Direct Commands
-
-You can also use PM2 commands directly:
-
-```bash
-# View detailed logs
-pm2 logs TaintedBySatoshi_backend --lines 100
-pm2 logs TaintedBySatoshi_frontend --lines 100
-
-# Monitor in real-time
-pm2 monit
-
-# Restart with zero downtime
-pm2 reload ecosystem.config.js
-
-# Save PM2 process list (persist across reboots)
-pm2 save
-
-# Setup PM2 to start on system boot
-pm2 startup
-```
-
-### Background Synchronization
-
-When running with PM2, the backend automatically:
-
-- **Starts immediately** and serves API requests
-- **Syncs in background** processing blocks in chunks of 100
-- **Adapts sync speed** based on how far behind:
-  - Very behind (>1000 blocks): every 5 seconds
-  - Behind (>100 blocks): every 30 seconds
-  - Almost caught up (1-100 blocks): every 2 minutes
-  - Fully synced: checks every 10 minutes
-
-Monitor sync progress:
-
-```bash
-# Check sync status
-curl http://localhost:3001/api/sync-status
-
-# Watch logs in real-time
-npm run pm2:logs:backend
-```
-
-You no longer need to run `npm run update-satoshi-data` manually - everything syncs automatically in the background!
-
-### Updating Environment Variables
-
-**IMPORTANT**: Frontend and backend handle environment variables differently:
-
-#### Backend Environment Variables
-
-Backend loads `.env` at runtime, so changes take effect immediately:
-
-```bash
-# Edit backend/.env
-nano backend/.env
-
-# Restart backend to apply changes
-npm run deploy:backend
-```
-
-#### Frontend Environment Variables
-
-**Frontend compiles environment variables into the build** (they become hardcoded in JavaScript). After changing `frontend/.env`, you **must rebuild**:
-
-```bash
-# Edit frontend/.env
-nano frontend/.env
-
-# REQUIRED: Rebuild and restart to apply changes
-npm run deploy:frontend
-```
-
-**Why?** Next.js `NEXT_PUBLIC_*` variables are replaced at build time for security and performance. Simply restarting PM2 won't pick up new values - you must rebuild.
-
-**Common mistake:**
-```bash
-# ❌ This WON'T update frontend env vars
-nano frontend/.env
-npm run pm2:restart:frontend
-
-# ✅ This WILL update frontend env vars
-nano frontend/.env
-npm run deploy:frontend
-```
-
-### Environment Configuration
-
-Make sure your `.env` files are properly configured in both `backend/` and `frontend/` directories before starting with PM2.
-
-The PM2 configuration (`ecosystem.config.js`) automatically:
-- Loads environment variables from `.env` files
-- Manages memory limits (8GB for backend, 2GB for frontend)
-- Handles automatic restarts
-- Stores logs in `backend/logs/` and `frontend/logs/`
-
-## 🔬 Patoshi Pattern Analysis
-
-This project uses **verified Patoshi blocks** to identify addresses belonging to Satoshi Nakamoto.
-
-### What is Patoshi?
-
-"Patoshi" refers to a unique mining pattern discovered by **Sergio Demian Lerner** in 2013 that identifies blocks mined by Satoshi Nakamoto with high confidence.
-
-**Key Identifying Patterns:**
-
-1. **Nonce LSB Pattern**: The last byte of the nonce is ALWAYS in ranges 0-9 or 19-58 (not 10-18 or 59-255 like other miners)
-2. **ExtraNonce Increment**: Increments ~5x faster than normal (only scans 1/5 of nonce space)
-3. **No Timestamp Reversals**: Satoshi's blocks never have backwards timestamps
-
-**Dataset Used:**
-
-- **21,953 verified Patoshi blocks** (blocks 3-49,973)
-- **Plus early Satoshi blocks** (blocks 0-2): Genesis block and first mined blocks
-- Curated by Sergio Demian Lerner & Jameson Lopp
-- Source: https://github.com/bensig/patoshi-addresses
-- Research: https://bitslog.com/2013/04/17/the-well-deserved-fortune-of-satoshi-nakamoto/
-
-**Address Extraction Process:**
-
-The application automatically extracts coinbase addresses when you run `npm run update-satoshi-data`:
-
-- Iterates through all 21,953 verified Patoshi block heights
-- Includes Genesis block (1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa) and blocks 1-2
-- Extracts coinbase addresses (mining rewards) from each block
-- Generates `backend/data/satoshiAddresses.js` with ~21,956 addresses
-- Takes approximately 25-30 minutes on first run
-- Subsequent runs skip extraction if addresses are already present
-
-## 📝 Updating Transaction Data
-
-The application maintains a database of transactions connected to Satoshi's addresses. To update this data:
-
-### Available Scripts
-
-#### Backend Scripts
-
-| Script                        | Description                                                     |
-| ----------------------------- | --------------------------------------------------------------- |
-| `npm start`                   | Start the production server                                     |
-| `npm run dev`                 | Start development server with hot reload                        |
-| `npm run check-node`          | Check Bitcoin node RPC status                                   |
-| `npm run update-satoshi-data` | **Extract addresses & scan blockchain** (fully automated)       |
-| `npm run check-satoshi-data`  | View taint database statistics                                  |
-
-The `update-satoshi-data` script is fully automated and includes:
-
-- **Automatic address extraction** (if not already done)
-  - Extracts ~21,956 addresses from Genesis block + 21,953 Patoshi blocks
-  - Takes 25-30 minutes on first run, skipped on subsequent runs
-- **Blockchain scanning**
-  - Scans entire blockchain for tainted transactions
-  - Tracks Bitcoin flow from Satoshi addresses to all connected addresses
-- **Performance optimizations**
-  - Automatic garbage collection with `--expose-gc`
-  - 8GB heap allocation with `--max-old-space-size=8192`
-  - Transaction batch processing
-  - Progress monitoring with visual feedback
-  - Automatic retry mechanism with exponential backoff
-  - Memory usage monitoring
-
-#### Frontend Scripts
-
-| Script          | Description              | Command      |
-| --------------- | ------------------------ | ------------ |
-| `npm run dev`   | Start development server | `next dev`   |
-| `npm run build` | Build for production     | `next build` |
-| `npm run start` | Start production server  | `next start` |
-| `npm run lint`  | Run ESLint               | `next lint`  |
-
-### Running the Application
-
-1. Start the backend development server:
-
-```bash
-cd backend
-npm run dev
-```
-
-2. Start the frontend development server:
-
-```bash
-cd frontend
-npm run dev
-```
-
-3. Initialize or update the Satoshi transaction database (fully automated):
-
-```bash
-cd backend
-npm run update-satoshi-data
-```
-
-This command automatically:
-- Extracts Patoshi addresses (first time only, ~25-30 min)
-- Scans the blockchain for all tainted transactions
-- Updates the database with new connections
-
-4. Check taint database statistics:
-
-```bash
-cd backend
-npm run check-satoshi-data
-```
-
-The application will be available at:
-
-- Frontend: http://localhost:3000 (default)
-- Backend API: http://localhost:3001 (default)
-
-## 📝 API Endpoints
-
-### GET `/api/check/:address`
-
-Check if a Bitcoin address has any connection to Satoshi's wallets.
+Check if an address is connected to Satoshi.
 
 **Response:**
-
 ```json
 {
-  "isConnected": boolean,
-  "isSatoshiAddress": boolean,
-  "degree": number,
-  "note": string,
+  "isConnected": true,
+  "isSatoshiAddress": false,
+  "degree": 3,
   "connectionPath": [
-    {
-      "from": string,
-      "to": string,
-      "txHash": string,
-      "amount": number
-    }
+    {"from": "1A1z...", "to": "1BvB...", "txHash": "abc123...", "amount": 50}
   ]
 }
 ```
 
-## 📊 Analytics
+### Other Endpoints
 
-The application includes a built-in, open source, privacy-respecting analytics system. All analytics data is stored locally and the stats page is publicly accessible.
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/sync-status` | Blockchain sync progress |
+| `GET /api/health` | Health check |
+| `GET /api/analytics/stats` | Public usage statistics |
 
-### Features
+## Documentation
 
-- **Privacy-first**: No personal data collected, IPs are anonymized (hashed daily)
-- **No cookies**: Visitor identification uses anonymous daily hashes
-- **Local storage**: All data stored in separate LevelDB (`./data/analytics`)
-- **Public stats**: View analytics at `/stats`
-- **Configurable retention**: Keep data forever or set a limit
+- [Development Guide](docs/DEVELOPMENT.md) - Scripts, debugging, local setup
+- [Deployment Guide](docs/DEPLOYMENT.md) - PM2, production, monitoring
+- [Configuration Reference](docs/CONFIGURATION.md) - All environment variables
+- [Patoshi Analysis](docs/PATOSHI.md) - Technical background on Satoshi identification
 
-### Public Stats Page
+## Tech Stack
 
-Visit `/stats` to see:
-- Total page views and unique visitors (last 30 days)
-- Top pages visited
-- Traffic sources (referrers)
-- Device breakdown (desktop/mobile/bot)
+| Component | Technology |
+|-----------|------------|
+| Frontend | Next.js 14, Material-UI, React |
+| Backend | Express.js, LevelDB |
+| Bitcoin | bitcoinjs-lib, Bitcoin Core RPC |
+| Process Manager | PM2 |
 
-### API Endpoints
+## Notes
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/analytics/track` | POST | Track page view or event |
-| `/api/analytics/stats` | GET | Get public statistics |
-| `/api/analytics/status` | GET | Analytics service status |
+- Only tracks **outgoing** transactions from Satoshi to avoid false positives
+- Supports all address types (P2PKH, P2SH, SegWit)
+- Initial sync takes several hours depending on hardware
 
-### Configuration
-
-Analytics is enabled by default. To disable:
-
-```env
-ANALYTICS_ENABLED=false
-```
-
-Data retention (in `backend/.env`):
-
-```env
-# Keep data forever (default)
-ANALYTICS_RETENTION_DAYS=0
-
-# Or set a limit (e.g., 90 days)
-ANALYTICS_RETENTION_DAYS=90
-```
-
-### Data Storage
-
-Analytics uses a **separate database** from the main tainted transactions DB:
-- Main DB: `./data/satoshi-transactions`
-- Analytics DB: `./data/analytics`
-
-This separation ensures you can resync the blockchain without losing analytics data.
-
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+2. Create feature branch (`git checkout -b feature/amazing`)
+3. Commit changes
+4. Push and open PR
 
-## ⚠️ Notes
+## License
 
-- This tool tracks outgoing transactions from Satoshi's known addresses to avoid false positives from people sending coins to Satoshi's addresses.
-- The initial database build can take several hours depending on your Bitcoin node and system performance.
-- The application supports all types of Bitcoin addresses (Legacy P2PKH, P2SH, and Native SegWit).
-- While Satoshi only used P2PKH addresses, the tracking system follows coins through all address types to maintain complete traceability.
-
-## 🚀 Performance Optimization
-
-### Bitcoin Core Configuration
-
-Add these settings to your bitcoin.conf for optimal performance:
-
-```conf
-# RPC Settings
-rpcworkqueue=128     # Increased queue for parallel requests
-rpcthreads=8        # Adjust based on CPU cores
-rpctimeout=60       # Increased timeout for complex queries
-
-# Performance Settings
-dbcache=4096        # Adjust based on available RAM (MB)
-par=8               # Parallel script verification threads
-maxconnections=125  # Default is good for most cases
-txindex=1          # Required for transaction lookups
-```
-
-### Node.js Memory Management
-
-The application uses advanced memory management techniques:
-
-- Garbage collection optimization with `--expose-gc`
-- Increased heap size with `--max-old-space-size`
-- Transaction caching
-- Batch processing
-- Memory usage monitoring
-
-### Main Script: `npm run update-satoshi-data`
-
-This is the primary command for initializing and updating the database. It's fully automated:
-
-```bash
-node --expose-gc --max-old-space-size=8192 src/scripts/updateSatoshiData.js
-```
-
-**What it does automatically:**
-
-1. **Address Extraction** (first run only, ~25-30 minutes)
-   - Extracts addresses from Genesis block (block 0)
-   - Extracts addresses from early Satoshi blocks (1-2)
-   - Extracts addresses from 21,953 verified Patoshi blocks (3-49,973)
-   - Generates `data/satoshiAddresses.js` with ~21,956 addresses
-
-2. **Blockchain Scanning** (several hours depending on system)
-   - Scans entire blockchain chronologically
-   - Identifies all addresses that received Bitcoin from Satoshi
-   - Tracks multi-hop connections (taint propagation)
-   - Stores transaction paths in LevelDB
-
-**Performance optimizations:**
-
-- Automatic garbage collection with `--expose-gc`
-- 8GB heap size allocation with `--max-old-space-size=8192`
-- Transaction caching
-- Parallel block processing
-- Memory usage monitoring
-- Automatic retry with exponential backoff
-
-### System Requirements
-
-Recommended hardware for optimal performance:
-
-- CPU: 4+ cores
-- RAM: 16GB+ (32GB recommended)
-- Storage: SSD/NVMe with 10GB+ free space
-- Network: Stable connection with good bandwidth
-
-## Environment Variables
-
-### Backend Variables
-
-| Variable                   | Description                                   | Default     |
-| -------------------------- | --------------------------------------------- | ----------- |
-| `PORT`                     | Server port                                   | `3001`      |
-| `FRONTEND_URL`             | Frontend URL for CORS                         | -           |
-| `NODE_ENV`                 | Environment (development/production)          | -           |
-| `BITCOIN_RPC_HOST`         | Bitcoin node hostname                         | `localhost` |
-| `BITCOIN_RPC_PORT`         | Bitcoin node RPC port                         | `8332`      |
-| `BITCOIN_RPC_USER`         | Bitcoin node RPC username                     | -           |
-| `BITCOIN_RPC_PASS`         | Bitcoin node RPC password                     | -           |
-| `BITCOIN_RPC_TIMEOUT`      | RPC request timeout in milliseconds           | `60000`     |
-| `DB_PATH`                  | Path to store the database files              | `./data`    |
-| `MAX_DEGREE`               | Maximum number of transaction hops to track   | `100`       |
-| `BATCH_SIZE`               | Number of transactions to process in parallel | `250`       |
-| `BITCOIN_MAX_RETRIES`      | Maximum retry attempts                        | `5`         |
-| `BITCOIN_MEMORY_THRESHOLD` | Memory usage threshold for GC                 | `0.90`      |
-| `BITCOIN_BLOCK_TIMEOUT`    | Block processing timeout in milliseconds      | `300000`    |
-| `ANALYTICS_ENABLED`        | Enable/disable analytics tracking             | `true`      |
-| `ANALYTICS_DB_PATH`        | Path for analytics database (separate from main DB) | `./data/analytics` |
-| `ANALYTICS_BATCH_SIZE`     | Events to batch before writing to DB          | `100`       |
-| `ANALYTICS_FLUSH_INTERVAL` | Batch flush interval in milliseconds          | `10000`     |
-| `ANALYTICS_RETENTION_DAYS` | Days to keep data (0 = infinite)              | `0`         |
-
-### Frontend Variables
-
-| Variable                       | Description              | Default                 |
-| ------------------------------ | ------------------------ | ----------------------- |
-| `NEXT_PUBLIC_API_URL`          | Backend API URL          | `http://localhost:3001` |
-| `NEXT_PUBLIC_DONATION_ADDRESS` | Bitcoin donation address | -                       |
-| `NEXT_PUBLIC_REPOSITORY_URL`   | GitHub repository URL    | -                       |
+[ISC](LICENSE.md)
