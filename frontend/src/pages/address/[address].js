@@ -9,15 +9,13 @@ import {
   Alert,
   AlertTitle,
   Chip,
-  List,
-  ListItem,
   Paper,
   Divider,
   Stack,
   CircularProgress,
   Link,
 } from "@mui/material";
-import { ArrowBack, ArrowForward, Info } from "@mui/icons-material";
+import { ArrowBack, Info } from "@mui/icons-material";
 import AddressSearchForm from "../../components/AddressSearchForm";
 import { useState, useEffect } from "react";
 import FamousWalletsSuggestions from "../../components/FamousWalletsSuggestions";
@@ -33,111 +31,12 @@ export async function getServerSideProps({ params }) {
   };
 }
 
-const formatBTC = (satoshis) => {
-  return (satoshis / 100000000).toFixed(8);
-};
-
 const getDegreeDescription = (degree) => {
   if (degree === 0) return "This is Satoshi's wallet";
-  if (degree === 1) return "Directly received from Satoshi";
-  if (degree === 2)
-    return "Received from an address that received from Satoshi";
-  return `Received through ${degree} levels of transactions from Satoshi`;
+  if (degree === 1) return "1 hop away - received directly from Satoshi";
+  if (degree === 2) return "2 hops away from Satoshi";
+  return `${degree} hops away from Satoshi`;
 };
-
-const ConnectionPath = ({ path }) => (
-  <List>
-    {path.map((step, index) => (
-      <ListItem key={index} sx={{ mb: 2 }}>
-        <Paper
-          elevation={1}
-          sx={{
-            p: 3,
-            width: "100%",
-            bgcolor: index === 0 ? "primary.50" : "background.paper",
-          }}
-        >
-          <Stack spacing={2}>
-            <Box
-              sx={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-              }}
-            >
-              <Chip
-                label={`Step ${index + 1}`}
-                color={index === 0 ? "primary" : "default"}
-                size="small"
-              />
-              <Typography variant="body2" color="text.secondary">
-                {formatBTC(step.amount)} BTC
-              </Typography>
-            </Box>
-
-            <Box>
-              <Typography variant="body2" color="text.secondary">
-                From:
-              </Typography>
-              <NextLink href={`/address/${step.from}`} passHref>
-                <Typography
-                  component="a"
-                  variant="body2"
-                  sx={{
-                    fontFamily: "monospace",
-                    color: "primary.main",
-                    textDecoration: "none",
-                    "&:hover": {
-                      textDecoration: "underline",
-                    },
-                  }}
-                >
-                  {step.from}
-                  {index === 0 && (
-                    <Chip
-                      label="Satoshi"
-                      color="primary"
-                      size="small"
-                      sx={{ ml: 1 }}
-                    />
-                  )}
-                </Typography>
-              </NextLink>
-            </Box>
-
-            <ArrowForward color="action" />
-
-            <Box>
-              <Typography variant="body2" color="text.secondary">
-                To:
-              </Typography>
-              <NextLink href={`/address/${step.to}`} passHref>
-                <Typography
-                  component="a"
-                  variant="body2"
-                  sx={{
-                    fontFamily: "monospace",
-                    color: "primary.main",
-                    textDecoration: "none",
-                    "&:hover": {
-                      textDecoration: "underline",
-                    },
-                  }}
-                >
-                  {step.to}
-                </Typography>
-              </NextLink>
-            </Box>
-
-            <Typography variant="caption" color="text.secondary">
-              Transaction: {step.txHash}
-            </Typography>
-          </Stack>
-        </Paper>
-      </ListItem>
-    ))}
-  </List>
-);
 
 export default function AddressPage({ address, initialLoad }) {
   const [isLoading, setIsLoading] = useState(initialLoad);
@@ -327,17 +226,37 @@ export default function AddressPage({ address, initialLoad }) {
               <Stack spacing={4}>
                 {data.isSatoshiAddress ? (
                   <>
-                    <Box>
+                    <Box sx={{ textAlign: "center" }}>
                       <Chip
                         label="Satoshi's Wallet"
                         color="primary"
-                        sx={{ px: 2, py: 1 }}
+                        sx={{
+                          px: 3,
+                          py: 2.5,
+                          fontSize: "1.1rem",
+                          fontWeight: 600,
+                          mb: 2,
+                        }}
                       />
+                      <Typography
+                        variant="h4"
+                        sx={{
+                          color: "primary.main",
+                          fontWeight: 700,
+                        }}
+                      >
+                        This is one of Satoshi Nakamoto's known addresses
+                      </Typography>
+                      {data.note && (
+                        <Typography
+                          variant="body1"
+                          color="text.secondary"
+                          sx={{ mt: 1 }}
+                        >
+                          {data.note}
+                        </Typography>
+                      )}
                     </Box>
-                    <Typography>
-                      This is one of Satoshi Nakamoto's known addresses.{" "}
-                      {data.note}
-                    </Typography>
                     <Divider />
                     <Box>
                       <Typography variant="body1" align="center" sx={{ mb: 4 }}>
@@ -348,36 +267,46 @@ export default function AddressPage({ address, initialLoad }) {
                   </>
                 ) : (
                   <>
-                    <Box>
-                      <Typography variant="h5" gutterBottom>
-                        Connection Status:{" "}
-                        <Typography
-                          component="span"
-                          color={
-                            data.isConnected ? "success.main" : "error.main"
-                          }
-                        >
-                          {data.isConnected
-                            ? "Connected to Satoshi"
-                            : "No connection to Satoshi found"}
-                        </Typography>
-                      </Typography>
-                      {data.isConnected && (
-                        <Typography color="text.secondary">
-                          {getDegreeDescription(data.degree)}
-                        </Typography>
+                    <Box sx={{ textAlign: "center" }}>
+                      {data.isConnected ? (
+                        <>
+                          <Chip
+                            label="Connected to Satoshi"
+                            color="success"
+                            sx={{
+                              px: 3,
+                              py: 2.5,
+                              fontSize: "1.1rem",
+                              fontWeight: 600,
+                              mb: 2,
+                            }}
+                          />
+                          <Typography
+                            variant="h4"
+                            sx={{
+                              color: "primary.main",
+                              fontWeight: 700,
+                            }}
+                          >
+                            {getDegreeDescription(data.degree)}
+                          </Typography>
+                        </>
+                      ) : (
+                        <Chip
+                          label="No connection to Satoshi found"
+                          color="error"
+                          sx={{
+                            px: 3,
+                            py: 2.5,
+                            fontSize: "1.1rem",
+                            fontWeight: 600,
+                          }}
+                        />
                       )}
                     </Box>
 
                     {data.isConnected ? (
                       <>
-                        <Divider />
-                        <Box>
-                          <Typography variant="h6" gutterBottom>
-                            Transaction Path:
-                          </Typography>
-                          <ConnectionPath path={data.connectionPath} />
-                        </Box>
                         <Divider />
                         <Box>
                           <Typography
