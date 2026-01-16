@@ -1,6 +1,6 @@
 {
   "name": "tainted-by-satoshi-backend",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Backend API for checking Bitcoin addresses connected to Satoshi",
   "main": "src/index.js",
   "scripts": {
@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "axios": "^1.13.2",
-    "bitcoinjs-lib": "^7.0.0",
+    "bitcoinjs-lib": "^7.0.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
