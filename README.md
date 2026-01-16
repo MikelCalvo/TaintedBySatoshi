@@ -1,6 +1,10 @@
 # 🫟 Tainted By Satoshi
 
+![Tainted By Satoshi](docs/images/landing_screenshot.png)
+
 Web application to check if a Bitcoin address has any connection to Satoshi Nakamoto's wallets through transaction history.
+
+**Try it live:** [TaintedBySatoshi.com](https://taintedbysatoshi.com)
 
 ## Features
 
