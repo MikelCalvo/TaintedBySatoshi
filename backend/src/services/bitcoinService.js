@@ -1,4 +1,5 @@
 const dbService = require("./dbService");
+const logger = require("../utils/logger");
 
 // Load Satoshi addresses with error handling
 let SATOSHI_ADDRESSES = [];
@@ -9,7 +10,7 @@ try {
   SATOSHI_NOTES = satoshiData.SATOSHI_NOTES || {};
 } catch (err) {
   // File doesn't exist yet - will be created by initialization
-  console.warn("Note: satoshiAddresses.js not found. Run initialization first.");
+  logger.warn("Note: satoshiAddresses.js not found. Run initialization first.");
 }
 
 async function checkAddressConnection(address) {
@@ -63,7 +64,7 @@ async function checkAddressConnection(address) {
           ]);
           return tx || { hash: p.txHash, amount: p.amount };
         } catch (err) {
-          console.warn(`Failed to fetch transaction ${p.txHash}:`, err.message);
+          logger.warn(`Failed to fetch transaction ${p.txHash}:`, err.message);
           return { hash: p.txHash, amount: p.amount };
         }
       })
@@ -77,7 +78,7 @@ async function checkAddressConnection(address) {
       transactions,
     };
   } catch (error) {
-    console.error("Database error:", error);
+    logger.error("Database error:", error);
     throw error;
   }
 }

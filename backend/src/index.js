@@ -7,6 +7,7 @@ const { checkAddressConnection } = require("./services/bitcoinService");
 const backgroundSyncService = require("./services/backgroundSyncService");
 const analyticsService = require("./services/analyticsService");
 const { validateAndSanitizeAddress } = require("./utils/validation");
+const logger = require("./utils/logger");
 const fs = require("fs");
 const path = require("path");
 
@@ -131,7 +132,7 @@ app.get("/api/health", (req, res) => {
       uptime: process.uptime(),
     });
   } catch (error) {
-    console.error("Health check failed:", error);
+    logger.error("Health check failed", { error: error.message });
     res.status(500).json({
       status: "unhealthy",
       error:
@@ -144,7 +145,7 @@ app.get("/api/health", (req, res) => {
 
 // Add error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  logger.error("Unhandled error", { error: err.message, stack: err.stack });
   res.status(500).json({
     error: "Internal Server Error",
     message:
@@ -160,7 +161,7 @@ app.get("/api/sync-status", (req, res) => {
     const status = backgroundSyncService.getStatus();
     res.json(status);
   } catch (error) {
-    console.error("Error getting sync status:", error);
+    logger.error("Error getting sync status", { error: error.message });
     res.status(500).json({
       error: "Failed to get sync status",
       message:
@@ -214,7 +215,7 @@ app.post("/api/analytics/track", analyticsTrackLimiter, async (req, res) => {
 
     res.status(204).send(); // No content - fast response
   } catch (error) {
-    console.error("[Analytics] Track error:", error.message);
+    logger.error("Analytics track error", { error: error.message });
     res.status(500).json({ error: "Failed to track event" });
   }
 });
@@ -243,7 +244,7 @@ app.get("/api/analytics/stats", async (req, res) => {
 
     res.json(stats);
   } catch (error) {
-    console.error("[Analytics] Stats error:", error.message);
+    logger.error("Analytics stats error", { error: error.message });
     res.status(500).json({ error: "Failed to get stats" });
   }
 });
@@ -283,7 +284,7 @@ app.get("/api/check/:address", addressCheckLimiter, async (req, res) => {
     res.json(result);
   } catch (error) {
     clearTimeout(timeoutId);
-    console.error("Error checking address:", error.message);
+    logger.error("Error checking address", { error: error.message });
 
     if (error.name === "AbortError") {
       return res.status(503).json({
@@ -303,34 +304,29 @@ app.get("/api/check/:address", addressCheckLimiter, async (req, res) => {
 
 // Global error handlers to prevent PM2 restarts
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Don't exit the process - log and continue
+  logger.error('Unhandled Rejection', { reason: String(reason) });
 });
 
 process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-  // Don't exit the process - log and continue
-  // Only exit on truly critical errors
+  logger.error('Uncaught Exception', { error: error.message, stack: error.stack });
   if (error.code === 'EADDRINUSE') {
-    console.error('Port already in use. Exiting...');
+    logger.error('Port already in use, exiting');
     process.exit(1);
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/api/health`);
-  console.log(`Sync status: http://localhost:${PORT}/api/sync-status`);
+  logger.info(`Server running on port ${PORT}`);
+  logger.info(`Health check: http://localhost:${PORT}/api/health`);
+  logger.info(`Sync status: http://localhost:${PORT}/api/sync-status`);
 
   // Start background sync service in next tick to avoid blocking
   setImmediate(async () => {
     try {
-      console.log("Starting background sync service...");
+      logger.info("Starting background sync service...");
       await backgroundSyncService.start();
     } catch (error) {
-      console.error("Failed to start background sync service:", error.message);
-      console.error(error.stack);
-      // Don't exit - server can still serve requests without sync
+      logger.error("Failed to start background sync service", { error: error.message });
     }
   });
 
@@ -338,9 +334,9 @@ app.listen(PORT, () => {
   setImmediate(async () => {
     try {
       await analyticsService.init();
+      logger.info("Analytics service initialized");
     } catch (error) {
-      console.error("Failed to start analytics service:", error.message);
-      // Don't exit - server can still serve requests without analytics
+      logger.error("Failed to start analytics service", { error: error.message });
     }
   });
 });

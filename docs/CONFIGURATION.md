@@ -13,6 +13,7 @@ Create `backend/.env` with these variables:
 | `PORT` | API server port | `3001` |
 | `NODE_ENV` | Environment mode | `development` |
 | `FRONTEND_URL` | Frontend URL for CORS | - |
+| `LOG_LEVEL` | Logging level (debug, info, warn, error) | `info` |
 
 ### Bitcoin Core RPC
 

@@ -1,5 +1,6 @@
 const { Level } = require("level");
 const path = require("path");
+const logger = require("../utils/logger");
 
 class DatabaseService {
   constructor() {
@@ -33,7 +34,7 @@ class DatabaseService {
         }
       }
 
-      console.log(`Database initialized at: ${this.dbPath}`);
+      logger.info(`Database initialized at: ${this.dbPath}`);
     }
     return this.db;
   }

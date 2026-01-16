@@ -4,6 +4,7 @@ const { Level } = require("level");
 const fs = require("fs");
 const path = require("path");
 const dbService = require("./dbService");
+const logger = require("../utils/logger");
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "../../data");
 const { Worker } = require("worker_threads");
 const os = require("os");
@@ -15,7 +16,7 @@ try {
   SATOSHI_ADDRESSES = satoshiData.SATOSHI_ADDRESSES || [];
 } catch (err) {
   // File doesn't exist yet - will be created by extract-patoshi-addresses
-  console.log("Note: satoshiAddresses.js not found. Run 'npm run extract-patoshi-addresses' first.");
+  logger.info("Note: satoshiAddresses.js not found. Run 'npm run extract-patoshi-addresses' first.");
 }
 
 const MAX_PARALLEL_REQUESTS = 16; // Increase from 5 to 16
@@ -34,7 +35,7 @@ async function withBackoff(fn, maxRetries = 5) {
         throw error;
       }
       const delay = BASE_DELAY * Math.pow(2, attempt - 1);
-      console.log(
+      logger.info(
         `Attempt ${attempt}/${maxRetries} failed, waiting ${
           delay / 1000
         }s before retry...`
@@ -115,7 +116,7 @@ class BitcoinRPC {
   async initialize() {
     if (this.initialized) return;
 
-    console.log(`Connecting to Bitcoin node at ${this.host}:${this.port}`);
+    logger.info(`Connecting to Bitcoin node at ${this.host}:${this.port}`);
     await this.testConnection();
     this.initialized = true;
   }
@@ -147,15 +148,15 @@ class BitcoinRPC {
       }
 
       const info = response.data.result;
-      console.log("\n=== Bitcoin Node Status ===");
-      console.log("------------------------");
-      console.log(`Network:     ${info.chain}`);
-      console.log(`Blocks:      ${info.blocks.toLocaleString()}`);
-      console.log(`Headers:     ${info.headers.toLocaleString()}`);
-      console.log(
+      logger.info("\n=== Bitcoin Node Status ===");
+      logger.info("------------------------");
+      logger.info(`Network:     ${info.chain}`);
+      logger.info(`Blocks:      ${info.blocks.toLocaleString()}`);
+      logger.info(`Headers:     ${info.headers.toLocaleString()}`);
+      logger.info(
         `Size:        ${(info.size_on_disk / 1024 / 1024 / 1024).toFixed(2)} GB`
       );
-      console.log("------------------------");
+      logger.info("------------------------");
 
       // Add sync check
       if (info.initialblockdownload) {
@@ -169,15 +170,15 @@ class BitcoinRPC {
           1024
         ).toFixed(2);
 
-        console.log("\n=== Sync Status ===");
-        console.log("------------------------");
-        console.log(`Progress:    ${progress}%`);
-        console.log(`Remaining:   ${remainingBlocks.toLocaleString()} blocks`);
-        console.log(`Est. Time:   ~${estimatedTimeHours} hours`);
-        console.log(`Est. Size:   ~${estimatedSizeGB} GB additional`);
-        console.log("------------------------\n");
+        logger.info("\n=== Sync Status ===");
+        logger.info("------------------------");
+        logger.info(`Progress:    ${progress}%`);
+        logger.info(`Remaining:   ${remainingBlocks.toLocaleString()} blocks`);
+        logger.info(`Est. Time:   ~${estimatedTimeHours} hours`);
+        logger.info(`Est. Size:   ~${estimatedSizeGB} GB additional`);
+        logger.info("------------------------\n");
 
-        console.error(`
+        logger.error(`
 ╔════════════════════════════════════════╗
 ║              Sync Required             ║
 ╚════════════════════════════════════════╝
@@ -190,12 +191,12 @@ Current Progress: ${progress}%
         process.exit(1);
       }
 
-      console.log("\n✓ Node is fully synced!");
-      console.log("------------------------\n");
+      logger.info("\n✓ Node is fully synced!");
+      logger.info("------------------------\n");
       return info;
     } catch (error) {
       if (error.code === "ECONNREFUSED") {
-        console.error(`
+        logger.error(`
 ╔════════════════════════════════════════╗
 ║          Connection Failed!            ║
 ╚════════════════════════════════════════╝
@@ -209,7 +210,7 @@ Please check:
 ✗ Is RPC port (${this.port}) accessible?
 `);
       } else {
-        console.error(`
+        logger.error(`
 ╔════════════════════════════════════════╗
 ║              Error                     ║
 ╚════════════════════════════════════════╝
@@ -249,18 +250,18 @@ ${error.message}
             new Set(txs),
           ])
         );
-        console.log(`Resuming scan from block ${startBlock}`);
+        logger.info(`Resuming scan from block ${startBlock}`);
       } catch (err) {
         // No saved progress, start fresh
         transactionsByAddress = new Map(
           addresses.map((addr) => [addr, new Set()])
         );
-        console.log("Starting fresh scan");
+        logger.info("Starting fresh scan");
       }
 
       // Don't load outpoints into memory - use DB queries instead
       // With 16.7M+ outpoints, we've exceeded JavaScript Set maximum size
-      console.log("Using database queries for tainted outpoint lookups (memory-efficient mode)");
+      logger.info("Using database queries for tainted outpoint lookups (memory-efficient mode)");
 
       // Clear the Set to save memory - we'll use only DB queries
       this.taintedOutpoints.clear();
@@ -302,7 +303,7 @@ ${error.message}
             });
           }
         } catch (error) {
-          console.error(`\nError processing block ${height}:`, error.message);
+          logger.error(`\nError processing block ${height}:`, error.message);
           // Save progress before retrying
           if (this.dbStatus.isOpen) {
             await db.put("scan_progress", {
@@ -330,7 +331,7 @@ ${error.message}
         ])
       );
     } catch (error) {
-      console.error("Error in getAddressTransactions:", error);
+      logger.error("Error in getAddressTransactions:", error);
       throw error;
     }
   }
@@ -585,7 +586,7 @@ ${error.message}
 
       return formatted;
     } catch (error) {
-      console.error("Error formatting transaction:", error);
+      logger.error("Error formatting transaction:", error);
       return {
         hash: tx.txid || tx.hash,
         time: tx.time,
@@ -615,11 +616,11 @@ ${error.message}
       const info = await this.call("getblockchaininfo");
       // Only log blockchain info if not initialized
       if (!this.initialized) {
-        console.log("Blockchain info:", info);
+        logger.info("Blockchain info:", info);
       }
       return info;
     } catch (error) {
-      console.error("Error getting blockchain info:", error);
+      logger.error("Error getting blockchain info:", error);
       throw error;
     }
   }
@@ -643,7 +644,7 @@ ${error.message}
 
       return response.data.result;
     } catch (error) {
-      console.error(`Bitcoin RPC error (${method}):`, error.message);
+      logger.error(`Bitcoin RPC error (${method}):`, error.message);
       throw error;
     }
   }
@@ -664,7 +665,7 @@ ${error.message}
           vout: tx.vout || [],
         });
       } catch (fallbackError) {
-        console.error("Failed to get transaction:", fallbackError);
+        logger.error("Failed to get transaction:", fallbackError);
         throw new Error(
           "Unable to fetch transaction. Make sure -txindex is enabled or the transaction is in the wallet."
         );

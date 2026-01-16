@@ -1,6 +1,7 @@
 require("dotenv").config();
 const dbService = require("./dbService");
 const bitcoinRPC = require("./bitcoinRPC");
+const logger = require("../utils/logger");
 const path = require("path");
 const fs = require("fs");
 
@@ -53,23 +54,23 @@ class BackgroundSyncService {
 
   async start() {
     if (this.isRunning) {
-      console.log("Background sync service is already running");
+      logger.info("Background sync service is already running");
       return;
     }
 
     if (!this.config.enabled) {
-      console.log("Background sync is disabled (SYNC_ENABLED=false)");
+      logger.info("Background sync is disabled (SYNC_ENABLED=false)");
       return;
     }
 
     this.isRunning = true;
-    console.log("Background sync service initializing...");
+    logger.info("Background sync service initializing...");
 
     // Initialize Bitcoin RPC connection
     try {
       await bitcoinRPC.initialize();
     } catch (error) {
-      console.error("Failed to initialize Bitcoin RPC:", error.message);
+      logger.error("Failed to initialize Bitcoin RPC:", error.message);
       this.isRunning = false;
       return;
     }
@@ -85,21 +86,21 @@ class BackgroundSyncService {
       ]);
     } catch (error) {
       if (error.message.includes("timeout")) {
-        console.log("⚠️  Initialization taking longer than expected, continuing in background...");
+        logger.info("⚠️  Initialization taking longer than expected, continuing in background...");
         // Continue initialization in background
         setImmediate(() => {
           this.ensureInitialized().catch(err => {
-            console.error("Background initialization failed:", err.message);
+            logger.error("Background initialization failed:", err.message);
           });
         });
       } else {
-        console.error("Failed to initialize database:", error.message);
+        logger.error("Failed to initialize database:", error.message);
         this.isRunning = false;
         return;
       }
     }
 
-    console.log(`Background sync service started`);
+    logger.info(`Background sync service started`);
 
     // Start continuous sync loop
     this.startSyncLoop();
@@ -110,12 +111,12 @@ class BackgroundSyncService {
     const scanDb = await bitcoinRPC.openDatabase();
 
     try {
-      console.log("🔍 Initializing Satoshi coinbase outputs as tainted...");
-      console.log(`Using ${SATOSHI_ADDRESSES.length.toLocaleString()} Patoshi addresses`);
-      console.log(`📚 Source: https://github.com/bensig/patoshi-addresses`);
-      console.log(`   Patoshi Pattern Analysis by Sergio Demian Lerner`);
-      console.log(`   https://bitslog.com/2013/04/17/the-well-deserved-fortune-of-satoshi-nakamoto/`);
-      console.log("\nScanning Patoshi blocks to extract coinbase outputs...");
+      logger.info("🔍 Initializing Satoshi coinbase outputs as tainted...");
+      logger.info(`Using ${SATOSHI_ADDRESSES.length.toLocaleString()} Patoshi addresses`);
+      logger.info(`📚 Source: https://github.com/bensig/patoshi-addresses`);
+      logger.info(`   Patoshi Pattern Analysis by Sergio Demian Lerner`);
+      logger.info(`   https://bitslog.com/2013/04/17/the-well-deserved-fortune-of-satoshi-nakamoto/`);
+      logger.info("\nScanning Patoshi blocks to extract coinbase outputs...");
 
       const { PATOSHI_BLOCKS } = require("../../data/patoshiBlocks");
       const coinbaseBatch = scanDb.batch();
@@ -129,7 +130,7 @@ class BackgroundSyncService {
         const height = allBlocks[i];
 
         if (i % 1000 === 0) {
-          console.log(
+          logger.info(
             `  Progress: ${i}/${allBlocks.length} (${((i / allBlocks.length) * 100).toFixed(1)}%)`
           );
         }
@@ -154,7 +155,7 @@ class BackgroundSyncService {
             initCount++;
           }
         } catch (error) {
-          console.error(`Error processing block ${height}:`, error.message);
+          logger.error(`Error processing block ${height}:`, error.message);
         }
       }
 
@@ -165,9 +166,9 @@ class BackgroundSyncService {
         count: initCount,
       });
 
-      console.log(`✓ Initialized ${initCount} Satoshi coinbase outputs as tainted\n`);
+      logger.info(`✓ Initialized ${initCount} Satoshi coinbase outputs as tainted\n`);
     } catch (error) {
-      console.error("Failed to initialize coinbase outputs:", error.message);
+      logger.error("Failed to initialize coinbase outputs:", error.message);
       throw error;
     }
     // Don't close scanDb - it's a shared instance managed by bitcoinRPC
@@ -182,7 +183,7 @@ class BackgroundSyncService {
       try {
         await this.checkAndSync();
       } catch (err) {
-        console.error("Error in sync loop:", err.message);
+        logger.error("Error in sync loop:", err.message);
         this.syncStats.errors++;
       }
 
@@ -219,7 +220,7 @@ class BackgroundSyncService {
 
   async ensureInitialized() {
     try {
-      console.log("[Init] Step 1: Checking data directory...");
+      logger.info("[Init] Step 1: Checking data directory...");
       const satoshiAddressesPath = path.join(__dirname, "../../data/satoshiAddresses.js");
       const DB_PATH = process.env.DB_PATH || path.join(__dirname, "../../data");
 
@@ -230,28 +231,28 @@ class BackgroundSyncService {
 
       // Step 1: Check and extract Patoshi addresses if needed
       if (!fs.existsSync(satoshiAddressesPath)) {
-        console.log("\n⚠️  Patoshi addresses not found.");
-        console.log("📥 This will be extracted in background. Server will continue serving requests.\n");
+        logger.info("\n⚠️  Patoshi addresses not found.");
+        logger.info("📥 This will be extracted in background. Server will continue serving requests.\n");
 
         // Extract addresses in background to not block startup
         setImmediate(async () => {
           try {
             const { extractPatoshiAddresses } = require("../scripts/extractPatoshiAddresses");
             await extractPatoshiAddresses();
-            console.log("✓ Patoshi addresses extracted successfully");
+            logger.info("✓ Patoshi addresses extracted successfully");
             // Trigger a reload of the sync service
             loadSatoshiAddresses();
           } catch (err) {
-            console.error("Failed to extract Patoshi addresses:", err.message);
+            logger.error("Failed to extract Patoshi addresses:", err.message);
           }
         });
 
         // For now, use empty array and let background extraction finish
-        console.log("[Init] Continuing without addresses for now...");
+        logger.info("[Init] Continuing without addresses for now...");
         return;
       }
 
-      console.log("[Init] Step 2: Loading Satoshi addresses...");
+      logger.info("[Init] Step 2: Loading Satoshi addresses...");
       // Load addresses
       if (!loadSatoshiAddresses()) {
         throw new Error("Failed to load Satoshi addresses");
@@ -260,15 +261,15 @@ class BackgroundSyncService {
       if (SATOSHI_ADDRESSES.length === 0) {
         throw new Error("No Satoshi addresses found in satoshiAddresses.js");
       }
-      console.log(`[Init] Loaded ${SATOSHI_ADDRESSES.length.toLocaleString()} Satoshi addresses`);
+      logger.info(`[Init] Loaded ${SATOSHI_ADDRESSES.length.toLocaleString()} Satoshi addresses`);
 
-      console.log("[Init] Step 3: Initializing main database...");
+      logger.info("[Init] Step 3: Initializing main database...");
       // Step 2: Initialize main database and Satoshi addresses
       const db = await dbService.init();
       this.dbReady = true;
-      console.log("[Init] Main database ready");
+      logger.info("[Init] Main database ready");
 
-      console.log("[Init] Step 4: Scheduling address initialization check...");
+      logger.info("[Init] Step 4: Scheduling address initialization check...");
       // Check and initialize addresses in background (don't block)
       setImmediate(async () => {
         try {
@@ -278,13 +279,13 @@ class BackgroundSyncService {
           try {
             const testAddress = SATOSHI_ADDRESSES[0];
             await db.get(`tainted:${testAddress}`);
-            console.log("[Init] Satoshi addresses already initialized");
+            logger.info("[Init] Satoshi addresses already initialized");
           } catch (err) {
             needsInit = true;
           }
 
           if (needsInit) {
-            console.log("[Init] Initializing Satoshi addresses...");
+            logger.info("[Init] Initializing Satoshi addresses...");
             const taintedBatch = db.batch();
             for (const address of SATOSHI_ADDRESSES) {
               taintedBatch.put(`tainted:${address}`, {
@@ -297,14 +298,14 @@ class BackgroundSyncService {
               });
             }
             await taintedBatch.write();
-            console.log(`✓ Initialized ${SATOSHI_ADDRESSES.length.toLocaleString()} Satoshi addresses`);
+            logger.info(`✓ Initialized ${SATOSHI_ADDRESSES.length.toLocaleString()} Satoshi addresses`);
           }
         } catch (err) {
-          console.error("Failed to initialize Satoshi addresses:", err.message);
+          logger.error("Failed to initialize Satoshi addresses:", err.message);
         }
       });
 
-      console.log("[Init] Step 5: Scheduling coinbase initialization check...");
+      logger.info("[Init] Step 5: Scheduling coinbase initialization check...");
       // Check coinbase initialization completely in background
       setImmediate(async () => {
         try {
@@ -314,31 +315,31 @@ class BackgroundSyncService {
           let needsCoinbaseInit = false;
           try {
             await scanDb.get("satoshi_coinbase_initialized");
-            console.log("[Init] Coinbase outputs already initialized");
+            logger.info("[Init] Coinbase outputs already initialized");
           } catch (err) {
             needsCoinbaseInit = true;
-            console.log("[Init] Coinbase outputs need initialization");
+            logger.info("[Init] Coinbase outputs need initialization");
           }
 
           // Don't close scanDb - it's a shared instance
 
           if (needsCoinbaseInit) {
-            console.log("🔍 Initializing Satoshi coinbase outputs in background...");
-            console.log(`   This is a one-time process that may take 25-30 minutes.`);
-            console.log(`   The server will continue serving requests.\n`);
+            logger.info("🔍 Initializing Satoshi coinbase outputs in background...");
+            logger.info(`   This is a one-time process that may take 25-30 minutes.`);
+            logger.info(`   The server will continue serving requests.\n`);
 
             // Initialize coinbase outputs
             await this.initializeCoinbaseOutputs();
           }
         } catch (err) {
-          console.error("Error checking coinbase initialization:", err.message);
+          logger.error("Error checking coinbase initialization:", err.message);
         }
       });
 
-      console.log("[Init] Initialization checks completed");
+      logger.info("[Init] Initialization checks completed");
     } catch (error) {
-      console.error("[Init] Error during initialization:", error.message);
-      console.error(error.stack);
+      logger.error("[Init] Error during initialization:", error.message);
+      logger.error(error.stack);
       throw error;
     }
   }
@@ -360,7 +361,7 @@ class BackgroundSyncService {
     this.mainDb = null;
     this.dbReady = false;
 
-    console.log("Background sync service stopped");
+    logger.info("Background sync service stopped");
   }
 
   async checkAndSync() {
@@ -370,7 +371,7 @@ class BackgroundSyncService {
 
     // Wait for database to be ready
     if (!this.dbReady) {
-      console.log("[Background Sync] Waiting for database initialization...");
+      logger.info("[Background Sync] Waiting for database initialization...");
       return;
     }
 
@@ -404,7 +405,7 @@ class BackgroundSyncService {
         const endBlock = Math.min(startBlock + this.config.chunkSize - 1, this.currentHeight);
         const remainingBlocks = this.currentHeight - lastProcessedBlock;
 
-        console.log(`[Background Sync] Processing chunk: blocks ${startBlock}-${endBlock} (${remainingBlocks.toLocaleString()} remaining)`);
+        logger.info(`[Background Sync] Processing chunk: blocks ${startBlock}-${endBlock} (${remainingBlocks.toLocaleString()} remaining)`);
 
         await this.syncNewBlocks(startBlock, endBlock, scanDb);
       } else {
@@ -412,7 +413,7 @@ class BackgroundSyncService {
         this.syncStats.lastSyncTime = new Date().toISOString();
       }
     } catch (error) {
-      console.error("[Background Sync] Error during sync check:", error.message);
+      logger.error("[Background Sync] Error during sync check:", error.message);
       this.syncStats.errors++;
     } finally {
       this.isSyncing = false;
@@ -457,12 +458,12 @@ class BackgroundSyncService {
           });
 
         } catch (error) {
-          console.error(`[Background Sync] Error processing block ${height}:`, error.message);
+          logger.error(`[Background Sync] Error processing block ${height}:`, error.message);
           this.syncStats.errors++;
 
           // If batch became invalid due to IO error, reset it for next block
           if (!this.batchIsValid) {
-            console.log("[Background Sync] Resetting batch after error");
+            logger.info("[Background Sync] Resetting batch after error");
             this.resetBatch();
           }
           // Continue with next block instead of retrying
@@ -473,9 +474,9 @@ class BackgroundSyncService {
       await this.flushBatch();
 
       this.syncStats.lastSyncTime = new Date().toISOString();
-      console.log(`[Background Sync] Processed ${processedBlocks} blocks successfully`);
+      logger.info(`[Background Sync] Processed ${processedBlocks} blocks successfully`);
     } catch (error) {
-      console.error("[Background Sync] Error in syncNewBlocks:", error.message);
+      logger.error("[Background Sync] Error in syncNewBlocks:", error.message);
       this.batchIsValid = false;
       // Don't throw - allow sync loop to continue
     } finally {
@@ -724,7 +725,7 @@ class BackgroundSyncService {
         this.parentTaintingCache.set(address, taintData);
       }
     } catch (error) {
-      console.error(`[Background Sync] Error processing address ${address}:`, error.message);
+      logger.error(`[Background Sync] Error processing address ${address}:`, error.message);
     }
   }
 
@@ -748,7 +749,7 @@ class BackgroundSyncService {
       return true;
     } catch (error) {
       // Batch became invalid (closed/written)
-      console.error("[Background Sync] Batch operation failed, marking batch as invalid:", error.message);
+      logger.error("[Background Sync] Batch operation failed, marking batch as invalid:", error.message);
       this.batchIsValid = false;
       return false;
     }
@@ -761,7 +762,7 @@ class BackgroundSyncService {
         this.batchCount = 0;
         this.batchIsValid = false; // Batch is consumed after write
       } catch (error) {
-        console.error("[Background Sync] Error flushing batch:", error.message);
+        logger.error("[Background Sync] Error flushing batch:", error.message);
         this.batchIsValid = false;
         // Don't throw - let the caller handle recovery
       }

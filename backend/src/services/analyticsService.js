@@ -3,6 +3,7 @@ const { Level } = require("level");
 const path = require("path");
 const crypto = require("crypto");
 const fs = require("fs");
+const logger = require("../utils/logger");
 
 class AnalyticsService {
   constructor() {
@@ -37,7 +38,7 @@ class AnalyticsService {
     if (this.db) return this.db;
 
     if (!this.config.enabled) {
-      console.log("[Analytics] Service is disabled (ANALYTICS_ENABLED=false)");
+      logger.info("[Analytics] Service is disabled (ANALYTICS_ENABLED=false)");
       return null;
     }
 
@@ -53,14 +54,14 @@ class AnalyticsService {
       });
 
       await this.db.open();
-      console.log(`[Analytics] Database initialized at: ${this.config.dbPath}`);
+      logger.info(`[Analytics] Database initialized at: ${this.config.dbPath}`);
 
       this.startBatchProcessor();
       this.isRunning = true;
 
       return this.db;
     } catch (error) {
-      console.error("[Analytics] Failed to initialize database:", error.message);
+      logger.error("[Analytics] Failed to initialize database:", error.message);
       return null;
     }
   }
@@ -186,13 +187,13 @@ class AnalyticsService {
       this.statsCache = null;
       this.statsCacheExpiry = 0;
     } catch (error) {
-      console.error("[Analytics] Error flushing batch:", error.message);
+      logger.error("[Analytics] Error flushing batch:", error.message);
       // Only re-add events if batch isn't too large (prevent memory DoS)
       // Drop events if we're accumulating too many failures
       if (this.eventBatch.length < this.config.batchSize * 3) {
         this.eventBatch.unshift(...eventsToProcess);
       } else {
-        console.warn("[Analytics] Dropping events due to repeated failures");
+        logger.warn("[Analytics] Dropping events due to repeated failures");
       }
     }
   }
@@ -435,7 +436,7 @@ class AnalyticsService {
     }
 
     this.isRunning = false;
-    console.log("[Analytics] Service stopped");
+    logger.info("[Analytics] Service stopped");
   }
 }
 
