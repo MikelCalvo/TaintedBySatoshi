@@ -391,69 +391,51 @@ class BackgroundSyncService {
     this.mainDb = db;
     let processedBlocks = 0;
 
-    // Initialize batch for main DB
-    this.resetBatch();
-
     try {
       for (let height = startBlock; height <= endBlock; height++) {
-        try {
-          // Get block hash
-          const hash = await this.bitcoinRPC.call("getblockhash", [height]);
+        this.resetBatch();
 
-          // Get full block data
-          const block = await this.bitcoinRPC.call("getblock", [hash, 2]);
+        const hash = await this.bitcoinRPC.call("getblockhash", [height]);
+        const block = await this.bitcoinRPC.call("getblock", [hash, 2]);
+        const scanOperations = (await this.processBlock(block, db, scanDb)) || [];
 
-          // Process the block
-          await this.processBlock(block, db, scanDb);
+        // Main data is made durable before the scan state can advance. If the
+        // second commit fails the checkpoint remains unchanged and this block
+        // is replayed idempotently on the next attempt.
+        await this.flushBatch();
 
-          processedBlocks++;
-          this.syncStats.blocksProcessed++;
-
-          // Flush batch periodically or when it reaches size limit
-          if (this.batchCount >= this.config.batchSize ||
-              Date.now() - this.lastBatchFlush >= this.config.batchFlushInterval) {
-            await this.flushBatch();
-            this.resetBatch();
-          }
-
-          // Update scan_progress after each block
-          await scanDb.put("scan_progress", {
-            lastBlock: height,
-            transactions: {}, // Not needed for incremental sync
-            lastUpdated: Date.now(),
-          });
-
-        } catch (error) {
-          logger.error(`[Background Sync] Error processing block ${height}:`, error.message);
-          this.syncStats.errors++;
-
-          // If batch became invalid due to IO error, reset it for next block
-          if (!this.batchIsValid) {
-            logger.info("[Background Sync] Resetting batch after error");
-            this.resetBatch();
-          }
-          // Continue with next block instead of retrying
+        const scanBatch = scanDb.batch();
+        for (const operation of scanOperations) {
+          scanBatch.put(operation.key, operation.value);
         }
-      }
+        scanBatch.put("scan_progress", {
+          lastBlock: height,
+          blockHash: hash,
+          schemaVersion: 2,
+          lastUpdated: Date.now(),
+        });
+        await scanBatch.write();
 
-      // Final batch flush
-      await this.flushBatch();
+        processedBlocks++;
+        this.syncStats.blocksProcessed++;
+        this.lastProcessedBlock = height;
+      }
 
       this.syncStats.lastSyncTime = new Date().toISOString();
       logger.info(`[Background Sync] Processed ${processedBlocks} blocks successfully`);
     } catch (error) {
       logger.error("[Background Sync] Error in syncNewBlocks:", error.message);
+      this.syncStats.errors++;
       this.batchIsValid = false;
-      // Don't throw - allow sync loop to continue
+      throw error;
     } finally {
       this.mainDb = null;
     }
   }
 
   async processBlock(block, db, scanDb) {
-    const taintedOutBatch = scanDb.batch();
     const callbackPromises = [];
-    let taintedOutCount = 0;
+    const scanOperations = [];
     const blockTaintedOutpoints = new Map();
 
     for (const tx of block.tx) {
@@ -574,9 +556,10 @@ class BackgroundSyncService {
           if (!alreadyTainted) {
             const address = this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
 
-            // Store tainted outpoint in batch
-            taintedOutBatch.put(`tainted_out:${outpoint}`, currentDegree);
-            taintedOutCount++;
+            scanOperations.push({
+              key: `tainted_out:${outpoint}`,
+              value: currentDegree,
+            });
             blockTaintedOutpoints.set(outpoint, currentDegree);
 
             // Process address if we have one
@@ -596,15 +579,12 @@ class BackgroundSyncService {
       }
     }
 
-    // Write tainted outputs batch
-    if (taintedOutCount > 0) {
-      await taintedOutBatch.write();
-    }
-
     // Execute address processing callbacks
     if (callbackPromises.length > 0) {
       await Promise.all(callbackPromises);
     }
+
+    return scanOperations;
   }
 
   async processAddressInBatch(address, currentDegree, transaction, db, sourceAddress = null) {
@@ -736,7 +716,7 @@ class BackgroundSyncService {
       } catch (error) {
         logger.error("[Background Sync] Error flushing batch:", error.message);
         this.batchIsValid = false;
-        // Don't throw - let the caller handle recovery
+        throw error;
       }
     }
   }
