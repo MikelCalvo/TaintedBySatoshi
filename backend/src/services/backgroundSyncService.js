@@ -812,14 +812,21 @@ class BackgroundSyncService {
   }
 
   async prefetchMainRecords(db, addresses, transactionIds) {
-    const keys = [
-      ...addresses.map((address) => `tainted:${address}`),
-      ...transactionIds.map((txid) => `tx:${txid}`),
-    ];
     const records = new Map();
-    if (keys.length === 0) return records;
-    const values = await db.getMany(keys);
-    keys.forEach((key, index) => records.set(key, values[index]));
+    const addressKeys = addresses.map((address) => `tainted:${address}`);
+    if (addressKeys.length > 0) {
+      const addressValues = await db.getMany(addressKeys);
+      addressKeys.forEach((key, index) =>
+        records.set(key, addressValues[index])
+      );
+    }
+    const transactionKeys = transactionIds.map((txid) => `tx:${txid}`);
+    if (transactionKeys.length > 0) {
+      const transactionValues = await db.getMany(transactionKeys);
+      transactionKeys.forEach((key, index) =>
+        records.set(key, transactionValues[index])
+      );
+    }
     return records;
   }
 
