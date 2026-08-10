@@ -15,6 +15,32 @@ try {
   logger.warn("Note: satoshiAddresses.js not found. Run initialization first.");
 }
 
+async function buildConnectionPath(db, address, taintedInfo, maxDepth = 10000) {
+  if (Array.isArray(taintedInfo.path)) return taintedInfo.path;
+
+  const reversed = [];
+  const visited = new Set([address]);
+  let current = taintedInfo;
+
+  while (current?.edge) {
+    reversed.push(current.edge);
+    const parentAddress = current.parentAddress;
+    if (!parentAddress) break;
+    if (visited.has(parentAddress) || reversed.length > maxDepth) {
+      throw new Error("Invalid taint parent chain");
+    }
+    visited.add(parentAddress);
+    try {
+      current = await db.get(`tainted:${parentAddress}`);
+    } catch (error) {
+      if (error.code === "LEVEL_NOT_FOUND") break;
+      throw error;
+    }
+  }
+
+  return reversed.reverse();
+}
+
 async function checkAddressConnection(address) {
   let db = null;
 
@@ -51,9 +77,11 @@ async function checkAddressConnection(address) {
       };
     }
 
+    const connectionPath = await buildConnectionPath(db, address, taintedInfo);
+
     // Get cached transaction details with timeout
     const transactions = await Promise.all(
-      taintedInfo.path.map(async (p) => {
+      connectionPath.map(async (p) => {
         try {
           const tx = await Promise.race([
             db.get(`tx:${p.txHash}`).catch(() => null),
@@ -76,7 +104,7 @@ async function checkAddressConnection(address) {
       isConnected: true,
       isSatoshiAddress: false,
       degree: taintedInfo.degree,
-      connectionPath: taintedInfo.path,
+      connectionPath,
       transactions,
     };
   } catch (error) {
@@ -87,5 +115,6 @@ async function checkAddressConnection(address) {
 
 module.exports = {
   checkAddressConnection,
+  buildConnectionPath,
   SATOSHI_ADDRESSES,
 };

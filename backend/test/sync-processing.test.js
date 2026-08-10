@@ -207,6 +207,57 @@ test("undefined values from LevelDB get are treated as missing", async () => {
   assert.deepEqual(queued.map((entry) => entry.key), ["tx:tx-a", "tainted:address-a"]);
 });
 
+test("new taint records store one parent edge instead of copying full paths", async () => {
+  const queued = [];
+  const mainDb = {
+    async get(key) {
+      if (key === "tainted:parent-address") {
+        return {
+          originalSatoshiAddress: "seed-address",
+          degree: 2,
+          path: [{ from: "seed-address", to: "parent-address" }],
+        };
+      }
+      return undefined;
+    },
+    batch() {
+      return {
+        put(key, value) {
+          queued.push({ key, value });
+        },
+        async write() {},
+      };
+    },
+  };
+  const service = serviceForProcessing();
+  service.mainDb = mainDb;
+  service.resetBatch();
+
+  await service.processAddressInBatch(
+    "child-address",
+    3,
+    {
+      hash: "child-tx",
+      time: 1,
+      inputs: [],
+      out: [{ addr: "child-address", value: 1 }],
+    },
+    mainDb,
+    "parent-address"
+  );
+
+  const child = queued.find((entry) => entry.key === "tainted:child-address").value;
+  assert.equal(child.originalSatoshiAddress, "seed-address");
+  assert.equal(child.parentAddress, "parent-address");
+  assert.deepEqual(child.edge, {
+    from: "parent-address",
+    to: "child-address",
+    txHash: "child-tx",
+    amount: 1,
+  });
+  assert.equal(child.path, undefined);
+});
+
 test("database I/O errors are not treated as untainted misses", async () => {
   const scanDb = {
     async getMany() {

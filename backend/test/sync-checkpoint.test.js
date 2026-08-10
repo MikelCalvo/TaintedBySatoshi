@@ -175,6 +175,27 @@ test("checkpoint persists block identity and schema version", async () => {
   assert.equal(service.lastProcessedBlock, 30);
 });
 
+test("a stored checkpoint hash mismatch stops before processing", async () => {
+  const service = createService({
+    mainDb: createBatchDb(),
+    bitcoinRPC: {
+      async call(method, params) {
+        assert.equal(method, "getblockhash");
+        assert.equal(params[0], 30);
+        return "new-hash-30";
+      },
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      service.verifyCheckpoint({
+        lastBlock: 30,
+        blockHash: "old-hash-30",
+      }),
+    /checkpoint hash mismatch/i
+  );
+});
 
 test("replaying a block after scan commit failure does not overwrite a shorter path", async () => {
   const stored = new Map([

@@ -9,11 +9,13 @@ const { normalizeTaintedDegree } = require("./syncUtils");
 // Load Satoshi addresses
 let SATOSHI_ADDRESSES = [];
 let SATOSHI_ADDRESS_SET = new Set();
+let ADDRESS_METADATA = {};
 function loadSatoshiAddresses() {
   try {
     const satoshiData = require("../../data/satoshiAddresses");
     SATOSHI_ADDRESSES = satoshiData.SATOSHI_ADDRESSES || [];
     SATOSHI_ADDRESS_SET = new Set(SATOSHI_ADDRESSES);
+    ADDRESS_METADATA = satoshiData.ADDRESS_METADATA || {};
     return SATOSHI_ADDRESSES.length > 0;
   } catch (err) {
     return false;
@@ -30,6 +32,9 @@ class BackgroundSyncService {
     if (dependencies.satoshiAddresses) {
       SATOSHI_ADDRESSES = dependencies.satoshiAddresses;
       SATOSHI_ADDRESS_SET = new Set(SATOSHI_ADDRESSES);
+    }
+    if (dependencies.addressMetadata) {
+      ADDRESS_METADATA = dependencies.addressMetadata;
     }
     this.isRunning = false;
     this.isSyncing = false;
@@ -136,13 +141,10 @@ class BackgroundSyncService {
       logger.info(`   https://bitslog.com/2013/04/17/the-well-deserved-fortune-of-satoshi-nakamoto/`);
       logger.info("\nScanning Patoshi blocks to extract coinbase outputs...");
 
-      const { PATOSHI_BLOCKS } = require("../../data/patoshiBlocks");
       const coinbaseBatch = scanDb.batch();
       let initCount = 0;
 
-      // Add genesis and early blocks
-      const EARLY_BLOCKS = [0, 1, 2];
-      const allBlocks = [...EARLY_BLOCKS, ...PATOSHI_BLOCKS];
+      const allBlocks = this.getSeedBlockHeights();
 
       for (let i = 0; i < allBlocks.length; i++) {
         const height = allBlocks[i];
@@ -323,6 +325,13 @@ class BackgroundSyncService {
     }
   }
 
+  getSeedBlockHeights() {
+    const metadataHeights = Object.values(ADDRESS_METADATA)
+      .map((metadata) => metadata?.blockHeight)
+      .filter(Number.isInteger);
+    return [...new Set([0, 1, 2, ...metadataHeights])].sort((a, b) => a - b);
+  }
+
   async stop() {
     if (!this.isRunning) {
       return;
@@ -371,18 +380,22 @@ class BackgroundSyncService {
       // Get last processed block from scan_progress DB
       const scanDb = await this.bitcoinRPC.openDatabase();
       let lastProcessedBlock = -1;
+      let progress = null;
 
       try {
-        const progress = await scanDb.get("scan_progress");
+        progress = await scanDb.get("scan_progress");
+      } catch (err) {
+        if (err.code !== "LEVEL_NOT_FOUND") throw err;
+      }
+
+      if (progress) {
+        await this.verifyCheckpoint(progress);
         lastProcessedBlock = progress.lastBlock ?? -1;
         this.durableCheckpoint = {
           height: lastProcessedBlock,
           hash: progress.blockHash || null,
           updatedAt: progress.lastUpdated || null,
         };
-      } catch (err) {
-        // No progress saved, start from beginning
-        lastProcessedBlock = -1;
       }
 
       this.lastProcessedBlock = lastProcessedBlock;
@@ -492,6 +505,18 @@ class BackgroundSyncService {
     };
     this.committedBlocks.push({ height, timestamp });
     if (this.committedBlocks.length > 1000) this.committedBlocks.shift();
+  }
+
+  async verifyCheckpoint(progress) {
+    if (!progress?.blockHash || !Number.isInteger(progress.lastBlock)) return;
+    const canonicalHash = await this.bitcoinRPC.call("getblockhash", [
+      progress.lastBlock,
+    ]);
+    if (canonicalHash !== progress.blockHash) {
+      throw new Error(
+        `Checkpoint hash mismatch at block ${progress.lastBlock}: expected ${progress.blockHash}, got ${canonicalHash}`
+      );
+    }
   }
 
   isReady() {
@@ -626,7 +651,6 @@ class BackgroundSyncService {
       if (err.code !== "LEVEL_NOT_FOUND") throw err;
     }
 
-    let path = [];
     let originalSatoshiAddress = address;
     let parentTinting = null;
 
@@ -648,16 +672,6 @@ class BackgroundSyncService {
 
     if (parentTinting) {
       originalSatoshiAddress = parentTinting.originalSatoshiAddress;
-      const output = transaction.out.find((candidate) => candidate.addr === address);
-      path = [
-        ...parentTinting.path,
-        {
-          from: sourceAddress,
-          to: address,
-          txHash: transaction.hash,
-          amount: output?.value || 0,
-        },
-      ];
     } else if (SATOSHI_ADDRESS_SET.has(address)) {
       originalSatoshiAddress = address;
     }
@@ -679,12 +693,22 @@ class BackgroundSyncService {
       throw new Error("Main database batch is not writable");
     }
 
+    const amount =
+      transaction.out.find((candidate) => candidate.addr === address)?.value || 0;
     const taintData = {
       txHash: transaction.hash,
       originalSatoshiAddress,
-      amount: transaction.out.find((candidate) => candidate.addr === address)?.value || 0,
+      amount,
       degree: currentDegree,
-      path,
+      parentAddress: parentTinting ? sourceAddress : null,
+      edge: parentTinting
+        ? {
+            from: sourceAddress,
+            to: address,
+            txHash: transaction.hash,
+            amount,
+          }
+        : null,
       lastUpdated: Date.now(),
     };
 

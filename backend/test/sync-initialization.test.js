@@ -56,6 +56,22 @@ test("tainted outpoint degrees accept legacy and canonical records", () => {
   );
 });
 
+test("coinbase block heights are derived from address metadata", () => {
+  const service = new BackgroundSyncService({
+    bitcoinRPC: {},
+    dbService: {},
+    logger: { info() {}, error() {} },
+    satoshiAddresses: ["seed-a", "seed-b", "seed-c"],
+    addressMetadata: {
+      "seed-a": { blockHeight: 4 },
+      "seed-b": { blockHeight: 2 },
+      "seed-c": { blockHeight: 4 },
+    },
+  });
+
+  assert.deepEqual(service.getSeedBlockHeights(), [0, 1, 2, 4]);
+});
+
 test("sync loop cannot start before initialization finishes", async () => {
   let releaseInitialization;
   const initializationGate = new Promise((resolve) => {
