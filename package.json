@@ -20,7 +20,12 @@
     "pm2:logs:frontend": "pm2 logs TaintedBySatoshi_frontend",
     "pm2:status": "pm2 status",
     "pm2:monit": "pm2 monit",
-    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
+    "install:all": "npm --prefix backend ci && npm --prefix frontend ci",
+    "test": "npm --prefix backend test && npm --prefix frontend test",
+    "lint": "npm --prefix frontend run lint",
+    "typecheck": "npm --prefix frontend run typecheck",
+    "build": "npm --prefix frontend run build",
+    "audit": "npm --prefix backend audit --audit-level=high && npm --prefix frontend audit --audit-level=high",
     "build:frontend": "cd frontend && npm run build",
     "deploy:frontend": "cd frontend && npm run build && cd .. && pm2 restart TaintedBySatoshi_frontend",
     "deploy:backend": "pm2 restart TaintedBySatoshi_backend",
@@ -35,5 +40,8 @@
     "taint-analysis"
   ],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "engines": {
+    "node": ">=24.19.0 <25"
+  }
 }

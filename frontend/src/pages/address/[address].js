@@ -1,4 +1,3 @@
-import { useRouter } from "next/router";
 import NextLink from "next/link";
 import SEO from "../../components/SEO";
 import {
@@ -43,7 +42,6 @@ export default function AddressPage({ address, initialLoad }) {
   const [error, setError] = useState(null);
   const [data, setData] = useState(null);
   const [syncStatus, setSyncStatus] = useState(null);
-  const router = useRouter();
 
   useEffect(() => {
     const retryWithBackoff = async (fn, retries = 2) => {
@@ -129,7 +127,7 @@ export default function AddressPage({ address, initialLoad }) {
         <Paper sx={{ p: 4, textAlign: "center" }}>
           <CircularProgress size={40} sx={{ mb: 2 }} />
           <Typography>
-            Checking address connection to Satoshi's wallets...
+            Checking address connection to Satoshi&apos;s wallets...
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
             This may take a moment
@@ -245,7 +243,7 @@ export default function AddressPage({ address, initialLoad }) {
                           fontWeight: 700,
                         }}
                       >
-                        This is one of Satoshi Nakamoto's known addresses
+                        This is one of Satoshi Nakamoto&apos;s known addresses
                       </Typography>
                       {data.note && (
                         <Typography

@@ -15,7 +15,7 @@ function isValidBitcoinAddress(address) {
     }
 
     return false;
-  } catch (error) {
+  } catch {
     return false;
   }
 }

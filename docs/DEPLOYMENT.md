@@ -4,19 +4,42 @@ Guide for deploying TaintedBySatoshi in production using PM2.
 
 ## Prerequisites
 
-- Node.js v18+
+- Node.js 24.19.0 LTS or newer Node 24 release
 - PM2 installed globally: `npm install -g pm2`
 - Bitcoin Core node running with `txindex=1`
 - Configured `.env` files in both `backend/` and `frontend/`
 
 ## Quick Deploy
 
+When upgrading from an older Node.js release, install and select the
+version pinned in `.nvmrc` before installing dependencies. PM2 itself is
+installed per Node version by nvm, so reinstall it under Node 24 and
+recreate the saved process list with the new interpreter:
+
 ```bash
-# From project root
+nvm install
+nvm use
+npm install -g pm2@latest
 npm run install:all
-npm run build:frontend
-npm run pm2:start
+npm run test
+npm run lint
+npm run typecheck
+npm run build
+npm run audit
 ```
+
+Only after all gates pass, switch the PM2 processes to the Node 24
+interpreter. This is the brief service-impacting step:
+
+```bash
+pm2 delete TaintedBySatoshi_backend TaintedBySatoshi_frontend
+pm2 start ecosystem.config.js
+pm2 save
+```
+
+Keep the existing `.env` files and persistent `DB_PATH`/analytics paths in
+place. Do not replace or delete the database directories during deployment.
+
 
 ## PM2 Commands
 

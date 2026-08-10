@@ -75,7 +75,7 @@ export default function Stats() {
         } else {
           setError("Failed to fetch analytics");
         }
-      } catch (err) {
+      } catch {
         setError("Unable to connect to analytics service");
       } finally {
         setLoading(false);

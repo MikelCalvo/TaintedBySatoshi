@@ -4,7 +4,7 @@ Local development setup and available scripts.
 
 ## Prerequisites
 
-- Node.js v18+
+- Node.js 24.19.0 LTS or newer Node 24 release
 - Bitcoin Core v22+ running with:
   - `server=1`
   - `txindex=1`

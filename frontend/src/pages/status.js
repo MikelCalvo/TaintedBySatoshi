@@ -38,7 +38,7 @@ export default function Status() {
         } else {
           setError("Failed to fetch sync status");
         }
-      } catch (err) {
+      } catch {
         setError("Unable to connect to the backend service");
       }
     };

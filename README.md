@@ -18,7 +18,7 @@ Web application to check if a Bitcoin address has any connection to Satoshi Naka
 
 ### Prerequisites
 
-- Node.js v18+
+- Node.js 24.19.0 LTS or newer Node 24 release
 - Bitcoin Core v22+ with `txindex=1` enabled
 - 10GB+ free disk space
 
@@ -29,8 +29,8 @@ git clone https://github.com/MikelCalvo/TaintedBySatoshi.git
 cd TaintedBySatoshi
 
 # Install dependencies
-cd backend && npm install
-cd ../frontend && npm install
+cd backend && npm ci
+cd ../frontend && npm ci
 ```
 
 ### Configuration
@@ -125,7 +125,7 @@ Check if an address is connected to Satoshi.
 
 | Component | Technology |
 |-----------|------------|
-| Frontend | Next.js 14, Material-UI, React |
+| Frontend | Next.js 16, Material UI 9, React 19 |
 | Backend | Express.js, LevelDB |
 | Bitcoin | bitcoinjs-lib, Bitcoin Core RPC |
 | Process Manager | PM2 |

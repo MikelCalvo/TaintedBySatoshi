@@ -18,7 +18,7 @@ export default function Home() {
             Tainted By Satoshi
           </Typography>
           <Typography variant="h6" color="text.secondary" gutterBottom>
-            Check if a Bitcoin address has any connection to Satoshi Nakamoto's
+            Check if a Bitcoin address has any connection to Satoshi Nakamoto&apos;s
             wallets
           </Typography>
         </Box>
