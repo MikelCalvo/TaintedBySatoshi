@@ -45,7 +45,8 @@ Create `backend/.env` with these variables:
 |----------|-------------|---------|
 | `SYNC_ENABLED` | Enable background sync | `true` |
 | `SYNC_INTERVAL` | Check interval when synced (ms) | `600000` |
-| `CHUNK_SIZE` | Blocks per sync chunk | `100` |
+| `CHUNK_SIZE` | Blocks per sync chunk (clamped to 1-500) | `250` |
+| `SYNC_PREFETCH_CONCURRENCY` | Concurrent RPC block fetches (clamped to 1-32) | `16` |
 
 ### Bitcoin Performance Tuning
 

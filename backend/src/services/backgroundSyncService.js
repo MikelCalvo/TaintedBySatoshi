@@ -25,6 +25,12 @@ function loadSatoshiAddresses() {
   }
 }
 
+function boundedPositiveInt(value, fallback, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, max);
+}
+
 class BackgroundSyncService {
   constructor(dependencies = {}) {
     this.bitcoinRPC = dependencies.bitcoinRPC || bitcoinRPC;
@@ -63,9 +69,12 @@ class BackgroundSyncService {
       enabled: process.env.SYNC_ENABLED !== "false", // default true
       batchSize: parseInt(process.env.BATCH_SIZE) || 1000,
       batchFlushInterval: parseInt(process.env.BATCH_FLUSH_INTERVAL) || 5000,
-      chunkSize: parseInt(process.env.CHUNK_SIZE) || 100, // Process 100 blocks per chunk
-      prefetchConcurrency:
-        parseInt(process.env.SYNC_PREFETCH_CONCURRENCY) || 8,
+      chunkSize: boundedPositiveInt(process.env.CHUNK_SIZE, 100, 500),
+      prefetchConcurrency: boundedPositiveInt(
+        process.env.SYNC_PREFETCH_CONCURRENCY,
+        8,
+        32
+      ),
     };
 
     // Batch management
