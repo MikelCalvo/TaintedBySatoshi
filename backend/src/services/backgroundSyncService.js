@@ -133,8 +133,7 @@ class BackgroundSyncService {
   }
 
   async initializeCoinbaseOutputs() {
-    // Use shared database instance to avoid locking conflicts
-    const scanDb = await this.bitcoinRPC.openDatabase();
+    const scanDb = await this.dbService.init();
 
     try {
       logger.info("🔍 Initializing Satoshi coinbase outputs as tainted...");
@@ -302,7 +301,7 @@ class BackgroundSyncService {
       }
 
       logger.info("[Init] Step 5: Checking coinbase seeds...");
-      const scanDb = await this.bitcoinRPC.openDatabase();
+      const scanDb = db;
       let coinbaseReady = false;
       try {
         await scanDb.get("satoshi_coinbase_initialized");
@@ -349,7 +348,6 @@ class BackgroundSyncService {
 
     await this.flushBatch();
     await this.dbService.close?.();
-    await this.bitcoinRPC.closeDatabase?.();
     this.batchIsValid = false;
     this.mainDb = null;
     this.dbReady = false;
@@ -377,8 +375,9 @@ class BackgroundSyncService {
       const blockchainInfo = await this.bitcoinRPC.getBlockchainInfo();
       this.currentHeight = blockchainInfo.blocks;
 
-      // Get last processed block from scan_progress DB
-      const scanDb = await this.bitcoinRPC.openDatabase();
+      // Scan state lives in the same LevelDB as taint records so one batch can
+      // atomically commit all block effects and the checkpoint.
+      const scanDb = await this.dbService.init();
       let lastProcessedBlock = -1;
       let progress = null;
 
@@ -462,22 +461,20 @@ class BackgroundSyncService {
         this.resetBatch();
         const scanOperations = (await this.processBlock(block, db, scanDb)) || [];
 
-        // Main data is made durable before the scan state can advance. If the
-        // second commit fails the checkpoint remains unchanged and this block
-        // is replayed idempotently on the next attempt.
-        await this.flushBatch();
-
-        const scanBatch = scanDb.batch();
         for (const operation of scanOperations) {
-          scanBatch.put(operation.key, operation.value);
+          if (!this.safeBatchPut(operation.key, operation.value)) {
+            throw new Error("Main database batch is not writable");
+          }
         }
-        scanBatch.put("scan_progress", {
+        if (!this.safeBatchPut("scan_progress", {
           lastBlock: height,
           blockHash: hash,
-          schemaVersion: 2,
+          schemaVersion: 3,
           lastUpdated: Date.now(),
-        });
-        await scanBatch.write();
+        })) {
+          throw new Error("Main database batch is not writable");
+        }
+        await this.flushBatch();
 
         processedBlocks++;
         this.syncStats.blocksProcessed++;

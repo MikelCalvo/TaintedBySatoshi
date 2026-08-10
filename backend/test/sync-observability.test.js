@@ -60,7 +60,7 @@ test("committed blocks update durable checkpoint throughput metrics", () => {
   assert.equal(status.metrics.blocksPerSecond, 1);
 });
 
-test("stop waits for an active sync and closes both databases", async () => {
+test("stop waits for an active sync and closes the shared database", async () => {
   let finishSync;
   const active = new Promise((resolve) => {
     finishSync = resolve;
@@ -94,6 +94,6 @@ test("stop waits for an active sync and closes both databases", async () => {
   finishSync();
   await stopping;
   assert.equal(mainClosed, true);
-  assert.equal(scanClosed, true);
+  assert.equal(scanClosed, false);
   assert.equal(sync.phase, "stopped");
 });

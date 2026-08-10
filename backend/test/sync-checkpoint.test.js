@@ -93,7 +93,7 @@ test("sync commits prefetched blocks strictly in height order", async () => {
 
   await service.syncNewBlocks(50, 52, scanDb);
 
-  assert.deepEqual(checkpoints(scanDb).map((entry) => entry.lastBlock), [50, 51, 52]);
+  assert.deepEqual(checkpoints(mainDb).map((entry) => entry.lastBlock), [50, 51, 52]);
 });
 
 test("a block failure stops the contiguous checkpoint", async () => {
@@ -110,12 +110,12 @@ test("a block failure stops the contiguous checkpoint", async () => {
     /decode failed/
   );
 
-  assert.deepEqual(checkpoints(scanDb).map((entry) => entry.lastBlock), [10]);
+  assert.deepEqual(checkpoints(mainDb).map((entry) => entry.lastBlock), [10]);
   assert.equal(service.lastProcessedBlock, 10);
   assert.equal(service.syncStats.blocksProcessed, 1);
 });
 
-test("checkpoint is written only after the main database batch is durable", async () => {
+test("failed atomic main commit cannot advance the checkpoint", async () => {
   const order = [];
   const mainDb = createBatchDb({ failWrite: true, order });
   const scanDb = createScanDb({ order });
@@ -132,27 +132,24 @@ test("checkpoint is written only after the main database batch is durable", asyn
 
   assert.deepEqual(order, ["main"]);
   assert.deepEqual(checkpoints(scanDb), []);
+  assert.deepEqual(mainDb.written, []);
   assert.equal(service.lastProcessedBlock, null);
 });
 
-test("scan state and checkpoint commit together after main data", async () => {
-  const order = [];
-  const mainDb = createBatchDb({ order });
-  const scanDb = createScanDb({ order });
+test("main mutations, scan state and checkpoint share one database commit", async () => {
+  const mainDb = createBatchDb();
   const service = createService({ mainDb });
   service.processBlock = async () => {
     service.safeBatchPut("tainted:test", { degree: 1 });
     return [{ key: "tainted_out:test:0", value: 1 }];
   };
 
-  await service.syncNewBlocks(30, 30, scanDb);
+  await service.syncNewBlocks(30, 30, mainDb);
 
-  assert.deepEqual(order, ["main", "scan"]);
   assert.deepEqual(
-    scanDb.written.map((operation) => operation.key),
-    ["tainted_out:test:0", "scan_progress"]
+    mainDb.written.map((operation) => operation.key),
+    ["tainted:test", "tainted_out:test:0", "scan_progress"]
   );
-  assert.equal(mainDb.written[0].key, "tainted:test");
 });
 
 test("checkpoint persists block identity and schema version", async () => {
@@ -163,12 +160,12 @@ test("checkpoint persists block identity and schema version", async () => {
 
   await service.syncNewBlocks(30, 30, scanDb);
 
-  const saved = checkpoints(scanDb);
+  const saved = checkpoints(mainDb);
   assert.equal(saved.length, 1);
   assert.deepEqual(saved[0], {
     lastBlock: 30,
     blockHash: "hash-30",
-    schemaVersion: 2,
+    schemaVersion: 3,
     lastUpdated: saved[0].lastUpdated,
   });
   assert.equal(typeof saved[0].lastUpdated, "number");
@@ -230,22 +227,4 @@ test("replaying a block after scan commit failure does not overwrite a shorter p
   );
 
   assert.equal(service.batchCount, 0);
-});
-
-test("a scan commit failure leaves the checkpoint unchanged for replay", async () => {
-  const mainDb = createBatchDb();
-  const scanDb = createScanDb({ failWrite: true });
-  const service = createService({ mainDb });
-  service.processBlock = async () => {
-    service.safeBatchPut("tainted:test", { degree: 1 });
-    return [{ key: "tainted_out:test:0", value: 1 }];
-  };
-
-  await assert.rejects(
-    () => service.syncNewBlocks(40, 40, scanDb),
-    /scan batch failed/
-  );
-
-  assert.deepEqual(checkpoints(scanDb), []);
-  assert.equal(service.lastProcessedBlock, null);
 });

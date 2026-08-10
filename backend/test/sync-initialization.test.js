@@ -88,7 +88,11 @@ test("coinbase initialization aborts instead of marking partial seeds ready", as
         return null;
       },
     },
-    dbService: {},
+    dbService: {
+      async init() {
+        return scanDb;
+      },
+    },
     logger: { info() {}, error() {} },
     satoshiAddresses: ["seed"],
     addressMetadata: { seed: { blockHeight: 2 } },
