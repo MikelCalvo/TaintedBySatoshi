@@ -50,6 +50,8 @@ class BackgroundSyncService {
       batchSize: parseInt(process.env.BATCH_SIZE) || 1000,
       batchFlushInterval: parseInt(process.env.BATCH_FLUSH_INTERVAL) || 5000,
       chunkSize: parseInt(process.env.CHUNK_SIZE) || 100, // Process 100 blocks per chunk
+      prefetchConcurrency:
+        parseInt(process.env.SYNC_PREFETCH_CONCURRENCY) || 8,
     };
 
     // Batch management
@@ -199,8 +201,9 @@ class BackgroundSyncService {
         const blocksBehind = this.currentHeight - this.lastProcessedBlock;
 
         if (blocksBehind > 1000) {
-          // Very behind: sync every 5 seconds
-          nextInterval = 5000;
+          // Keep the pipeline full while catching up. The sync method already
+          // provides DB and RPC backpressure.
+          nextInterval = 0;
         } else if (blocksBehind > 100) {
           // Behind: sync every 30 seconds
           nextInterval = 30000;
@@ -392,11 +395,26 @@ class BackgroundSyncService {
     let processedBlocks = 0;
 
     try {
-      for (let height = startBlock; height <= endBlock; height++) {
-        this.resetBatch();
+      const prefetched = this.bitcoinRPC.getBlocksWindow
+        ? await this.bitcoinRPC.getBlocksWindow(
+            startBlock,
+            endBlock,
+            this.config.prefetchConcurrency
+          )
+        : await Promise.all(
+            Array.from(
+              { length: endBlock - startBlock + 1 },
+              async (_, index) => {
+                const height = startBlock + index;
+                const hash = await this.bitcoinRPC.call("getblockhash", [height]);
+                const block = await this.bitcoinRPC.call("getblock", [hash, 2]);
+                return { height, hash, block };
+              }
+            )
+          );
 
-        const hash = await this.bitcoinRPC.call("getblockhash", [height]);
-        const block = await this.bitcoinRPC.call("getblock", [hash, 2]);
+      for (const { height, hash, block } of prefetched) {
+        this.resetBatch();
         const scanOperations = (await this.processBlock(block, db, scanDb)) || [];
 
         // Main data is made durable before the scan state can advance. If the
@@ -693,6 +711,7 @@ class BackgroundSyncService {
         batchSize: this.config.batchSize,
         batchFlushInterval: this.config.batchFlushInterval,
         chunkSize: this.config.chunkSize,
+        prefetchConcurrency: this.config.prefetchConcurrency,
       },
     };
   }

@@ -1,4 +1,5 @@
 const axios = require("axios");
+const http = require("http");
 const bitcoin = require("bitcoinjs-lib");
 const { Level } = require("level");
 const fs = require("fs");
@@ -45,12 +46,22 @@ async function withBackoff(fn, maxRetries = 5) {
   }
 }
 
+function isTransientRpcError(error) {
+  return (
+    ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH"].includes(
+      error?.code
+    ) ||
+    error?.response?.status === 429 ||
+    error?.response?.status >= 500
+  );
+}
+
 class BitcoinRPC {
-  constructor() {
-    this.host = process.env.BITCOIN_RPC_HOST || "localhost";
-    this.port = process.env.BITCOIN_RPC_PORT || 8332;
-    this.user = process.env.BITCOIN_RPC_USER;
-    this.pass = process.env.BITCOIN_RPC_PASS;
+  constructor(options = {}) {
+    this.host = options.host || process.env.BITCOIN_RPC_HOST || "localhost";
+    this.port = options.port || process.env.BITCOIN_RPC_PORT || 8332;
+    this.user = options.user || process.env.BITCOIN_RPC_USER;
+    this.pass = options.pass || process.env.BITCOIN_RPC_PASS;
     this.timeout = parseInt(process.env.BITCOIN_RPC_TIMEOUT) || 300000;
     this.initialized = false; // Add initialization flag
     this.addressCache = new Map(); // Cache for P2PK -> Address conversion
@@ -60,17 +71,26 @@ class BitcoinRPC {
       throw new Error("Bitcoin RPC credentials not configured");
     }
 
-    this.client = axios.create({
-      baseURL: `http://${this.host}:${this.port}`,
-      auth: {
-        username: this.user,
-        password: this.pass,
-      },
-      timeout: this.timeout,
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
+    this.client =
+      options.client ||
+      axios.create({
+        baseURL: `http://${this.host}:${this.port}`,
+        auth: {
+          username: this.user,
+          password: this.pass,
+        },
+        timeout: this.timeout,
+        httpAgent: new http.Agent({
+          keepAlive: true,
+          maxSockets:
+            options.maxParallelRequests ||
+            parseInt(process.env.BITCOIN_MAX_PARALLEL) ||
+            16,
+        }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
 
     // Ensure data directory exists
     const dataDir = path.join(__dirname, "../../data");
@@ -85,10 +105,15 @@ class BitcoinRPC {
     // Performance tuning
     this.config = {
       batchSize: parseInt(process.env.BITCOIN_BATCH_SIZE) || 100,
-      maxParallelRequests: parseInt(process.env.BITCOIN_MAX_PARALLEL) || 16,
+      maxParallelRequests:
+        options.maxParallelRequests ||
+        parseInt(process.env.BITCOIN_MAX_PARALLEL) ||
+        16,
       cacheSize: parseInt(process.env.BITCOIN_CACHE_SIZE) || 10000,
-      retryDelay: parseInt(process.env.BITCOIN_RETRY_DELAY) || 500,
-      maxRetries: parseInt(process.env.BITCOIN_MAX_RETRIES) || 5,
+      retryDelay:
+        options.retryDelay ?? (parseInt(process.env.BITCOIN_RETRY_DELAY) || 500),
+      maxRetries:
+        options.maxRetries || parseInt(process.env.BITCOIN_MAX_RETRIES) || 5,
       memoryThreshold: parseFloat(process.env.BITCOIN_MEMORY_THRESHOLD) || 0.85,
       blockTimeout: parseInt(process.env.BITCOIN_BLOCK_TIMEOUT) || 300000, // 5 minutes for block fetching
       blockBatchSize:
@@ -630,23 +655,65 @@ ${error.message}
   }
 
   async call(method, params = [], client = this.client) {
-    try {
-      const response = await client.post("/", {
-        jsonrpc: "1.0",
-        id: Date.now(),
-        method,
-        params,
-      });
+    for (let attempt = 1; attempt <= this.config.maxRetries; attempt++) {
+      try {
+        const response = await client.post("/", {
+          jsonrpc: "1.0",
+          id: `${Date.now()}-${attempt}`,
+          method,
+          params,
+        });
 
-      if (response.data.error) {
-        throw new Error(`RPC Error: ${response.data.error.message}`);
+        if (response.data.error) {
+          const error = new Error(`RPC Error: ${response.data.error.message}`);
+          error.rpcCode = response.data.error.code;
+          throw error;
+        }
+
+        return response.data.result;
+      } catch (error) {
+        const shouldRetry =
+          isTransientRpcError(error) && attempt < this.config.maxRetries;
+        if (!shouldRetry) {
+          logger.error(`Bitcoin RPC error (${method}):`, error.message);
+          throw error;
+        }
+        const delay = this.config.retryDelay * 2 ** (attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
-
-      return response.data.result;
-    } catch (error) {
-      logger.error(`Bitcoin RPC error (${method}):`, error.message);
-      throw error;
     }
+  }
+
+  async getBlocksWindow(
+    startHeight,
+    endHeight,
+    concurrency = this.config.maxParallelRequests
+  ) {
+    const heights = Array.from(
+      { length: endHeight - startHeight + 1 },
+      (_, index) => startHeight + index
+    );
+    const results = new Array(heights.length);
+    let cursor = 0;
+
+    const worker = async () => {
+      while (true) {
+        const index = cursor++;
+        if (index >= heights.length) return;
+        const height = heights[index];
+        const hash = await this.call("getblockhash", [height]);
+        const block = await this.call("getblock", [hash, 2]);
+        results[index] = { height, hash, block };
+      }
+    };
+
+    await Promise.all(
+      Array.from(
+        { length: Math.max(1, Math.min(concurrency, heights.length)) },
+        worker
+      )
+    );
+    return results;
   }
 
   async getTransaction(txid) {
@@ -843,3 +910,5 @@ ${error.message}
 
 // Export singleton instance
 module.exports = new BitcoinRPC();
+module.exports.BitcoinRPC = BitcoinRPC;
+module.exports.isTransientRpcError = isTransientRpcError;

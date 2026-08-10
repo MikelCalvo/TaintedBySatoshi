@@ -74,6 +74,28 @@ function checkpoints(scanDb) {
     .map((operation) => operation.value);
 }
 
+test("sync commits prefetched blocks strictly in height order", async () => {
+  const mainDb = createBatchDb();
+  const scanDb = createScanDb();
+  const service = createService({
+    mainDb,
+    bitcoinRPC: {
+      async getBlocksWindow() {
+        return [
+          { height: 50, hash: "hash-50", block: { hash: "hash-50", tx: [] } },
+          { height: 51, hash: "hash-51", block: { hash: "hash-51", tx: [] } },
+          { height: 52, hash: "hash-52", block: { hash: "hash-52", tx: [] } },
+        ];
+      },
+    },
+  });
+  service.processBlock = async () => [];
+
+  await service.syncNewBlocks(50, 52, scanDb);
+
+  assert.deepEqual(checkpoints(scanDb).map((entry) => entry.lastBlock), [50, 51, 52]);
+});
+
 test("a block failure stops the contiguous checkpoint", async () => {
   const mainDb = createBatchDb();
   const scanDb = createScanDb();
