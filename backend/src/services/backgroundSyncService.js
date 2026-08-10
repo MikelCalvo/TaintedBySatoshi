@@ -621,7 +621,7 @@ class BackgroundSyncService {
   ) {
     try {
       const existing = await db.get(`tainted:${address}`);
-      if (existing.degree <= currentDegree) return;
+      if (existing && existing.degree <= currentDegree) return;
     } catch (err) {
       if (err.code !== "LEVEL_NOT_FOUND") throw err;
     }
@@ -663,19 +663,20 @@ class BackgroundSyncService {
     }
 
     const txKey = `tx:${transaction.hash}`;
+    let transactionExists = false;
     try {
-      await db.get(txKey);
+      transactionExists = Boolean(await db.get(txKey));
     } catch (err) {
       if (err.code !== "LEVEL_NOT_FOUND") throw err;
-      if (!this.safeBatchPut(txKey, {
-        hash: transaction.hash,
-        time: transaction.time,
-        inputs: transaction.inputs,
-        outputs: transaction.out,
-        degree: currentDegree,
-      })) {
-        throw new Error("Main database batch is not writable");
-      }
+    }
+    if (!transactionExists && !this.safeBatchPut(txKey, {
+      hash: transaction.hash,
+      time: transaction.time,
+      inputs: transaction.inputs,
+      outputs: transaction.out,
+      degree: currentDegree,
+    })) {
+      throw new Error("Main database batch is not writable");
     }
 
     const taintData = {

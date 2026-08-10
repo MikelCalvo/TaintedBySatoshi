@@ -178,6 +178,35 @@ test("same-block spends use newly created tainted outpoints without database rea
   ]);
 });
 
+test("undefined values from LevelDB get are treated as missing", async () => {
+  const queued = [];
+  const mainDb = {
+    async get() {
+      return undefined;
+    },
+    batch() {
+      return {
+        put(key, value) {
+          queued.push({ key, value });
+        },
+        async write() {},
+      };
+    },
+  };
+  const service = serviceForProcessing();
+  service.mainDb = mainDb;
+  service.resetBatch();
+
+  await service.processAddressInBatch(
+    "address-a",
+    1,
+    { hash: "tx-a", time: 1, inputs: [], out: [{ addr: "address-a", value: 1 }] },
+    mainDb
+  );
+
+  assert.deepEqual(queued.map((entry) => entry.key), ["tx:tx-a", "tainted:address-a"]);
+});
+
 test("database I/O errors are not treated as untainted misses", async () => {
   const scanDb = {
     async getMany() {
