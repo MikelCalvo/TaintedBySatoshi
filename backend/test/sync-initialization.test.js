@@ -46,6 +46,7 @@ test("database initialization is single-flight", async () => {
 test("tainted outpoint degrees accept legacy and canonical records", () => {
   assert.equal(normalizeTaintedDegree(3), 3);
   assert.equal(normalizeTaintedDegree({ degree: 0 }), 0);
+  assert.equal(normalizeTaintedDegree({ degree: 2, address: "parent" }), 2);
   assert.throws(
     () => normalizeTaintedDegree({ degree: "1" }),
     /invalid tainted outpoint degree/i

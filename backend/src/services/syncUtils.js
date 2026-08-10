@@ -12,6 +12,17 @@ function normalizeTaintedDegree(value) {
   return degree;
 }
 
+function normalizeTaintedOutpoint(value) {
+  return {
+    degree: normalizeTaintedDegree(value),
+    address:
+      value && typeof value === "object" && typeof value.address === "string"
+        ? value.address
+        : null,
+  };
+}
+
 module.exports = {
   normalizeTaintedDegree,
+  normalizeTaintedOutpoint,
 };

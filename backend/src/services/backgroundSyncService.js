@@ -4,7 +4,10 @@ const bitcoinRPC = require("./bitcoinRPC");
 const logger = require("../utils/logger");
 const path = require("path");
 const fs = require("fs");
-const { normalizeTaintedDegree } = require("./syncUtils");
+const {
+  normalizeTaintedDegree,
+  normalizeTaintedOutpoint,
+} = require("./syncUtils");
 
 // Load Satoshi addresses
 let SATOSHI_ADDRESSES = [];
@@ -566,7 +569,7 @@ class BackgroundSyncService {
         if (value !== undefined) {
           externalDegrees.set(
             externalOutpoints[index],
-            normalizeTaintedDegree(value)
+            normalizeTaintedOutpoint(value)
           );
         }
       }
@@ -580,12 +583,12 @@ class BackgroundSyncService {
       for (const vin of tx.vin || []) {
         if (vin.coinbase) continue;
         const outpoint = `${vin.txid}:${vin.vout}`;
-        const degree = blockTaintedOutpoints.has(outpoint)
+        const taintedInput = blockTaintedOutpoints.has(outpoint)
           ? blockTaintedOutpoints.get(outpoint)
           : externalDegrees.get(outpoint);
-        if (degree !== undefined) {
-          inputDegrees.set(outpoint, degree);
-          minDegree = Math.min(minDegree, degree);
+        if (taintedInput !== undefined) {
+          inputDegrees.set(outpoint, taintedInput);
+          minDegree = Math.min(minDegree, taintedInput.degree);
         }
       }
 
@@ -612,8 +615,11 @@ class BackgroundSyncService {
       for (const vin of tx.vin || []) {
         if (vin.coinbase) continue;
         const outpoint = `${vin.txid}:${vin.vout}`;
-        if (inputDegrees.get(outpoint) !== minDegree) continue;
-        if (blockOutputAddresses.has(outpoint)) {
+        const taintedInput = inputDegrees.get(outpoint);
+        if (!taintedInput || taintedInput.degree !== minDegree) continue;
+        if (taintedInput.address) {
+          sourceAddress = taintedInput.address;
+        } else if (blockOutputAddresses.has(outpoint)) {
           sourceAddress = blockOutputAddresses.get(outpoint);
         } else if (vin.prevout?.scriptPubKey) {
           sourceAddress = this.bitcoinRPC.getAddressFromScript(
@@ -635,9 +641,12 @@ class BackgroundSyncService {
         const outpoint = `${txid}:${output.index}`;
         scanOperations.push({
           key: `tainted_out:${outpoint}`,
-          value: currentDegree,
+          value: { degree: currentDegree, address: output.address || null },
         });
-        blockTaintedOutpoints.set(outpoint, currentDegree);
+        blockTaintedOutpoints.set(outpoint, {
+          degree: currentDegree,
+          address: output.address || null,
+        });
 
         if (output.address) {
           await this.processAddressInBatch(

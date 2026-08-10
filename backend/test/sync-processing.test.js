@@ -96,7 +96,10 @@ test("block processing uses one multiget for unique external inputs", async () =
     "tainted_out:untainted:1",
   ]);
   assert.deepEqual(operations, [
-    { key: "tainted_out:child-a:0", value: 3 },
+    {
+      key: "tainted_out:child-a:0",
+      value: { degree: 3, address: "address-a" },
+    },
   ]);
 });
 
@@ -149,6 +152,38 @@ test("source addresses are resolved from the same batch tx when prevout is absen
   assert.equal(childCall[4], "seed-address");
 });
 
+test("external tainted outpoint provenance supplies the parent address", async () => {
+  const mainDb = emptyMainDb();
+  const scanDb = {
+    async getMany() {
+      return [{ degree: 4, address: "parent-address" }];
+    },
+  };
+  const service = serviceForProcessing();
+  service.mainDb = mainDb;
+  service.resetBatch();
+  const calls = [];
+  service.processAddressInBatch = async (...args) => calls.push(args);
+
+  await service.processBlock(
+    {
+      tx: [
+        {
+          txid: "child-tx",
+          vin: [{ txid: "parent-tx", vout: 1 }],
+          vout: [
+            { value: 10, scriptPubKey: { address: "child-address" } },
+          ],
+        },
+      ],
+    },
+    mainDb,
+    scanDb
+  );
+
+  assert.equal(calls[0][4], "parent-address");
+});
+
 test("new chronological outputs are written without existence point reads", async () => {
   let getCalls = 0;
   const scanDb = {
@@ -183,7 +218,10 @@ test("new chronological outputs are written without existence point reads", asyn
 
   assert.equal(getCalls, 0);
   assert.deepEqual(operations, [
-    { key: "tainted_out:seed-payment:0", value: 0 },
+    {
+      key: "tainted_out:seed-payment:0",
+      value: { degree: 0, address: "seed-address" },
+    },
   ]);
 });
 
@@ -225,8 +263,14 @@ test("same-block spends use newly created tainted outpoints without database rea
 
   assert.deepEqual(requested, []);
   assert.deepEqual(operations, [
-    { key: "tainted_out:parent:0", value: 0 },
-    { key: "tainted_out:child:0", value: 1 },
+    {
+      key: "tainted_out:parent:0",
+      value: { degree: 0, address: "seed-address" },
+    },
+    {
+      key: "tainted_out:child:0",
+      value: { degree: 1, address: "address-b" },
+    },
   ]);
 });
 
