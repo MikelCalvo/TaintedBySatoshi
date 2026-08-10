@@ -375,6 +375,11 @@ class BackgroundSyncService {
       try {
         const progress = await scanDb.get("scan_progress");
         lastProcessedBlock = progress.lastBlock ?? -1;
+        this.durableCheckpoint = {
+          height: lastProcessedBlock,
+          hash: progress.blockHash || null,
+          updatedAt: progress.lastUpdated || null,
+        };
       } catch (err) {
         // No progress saved, start from beginning
         lastProcessedBlock = -1;
@@ -490,7 +495,11 @@ class BackgroundSyncService {
   }
 
   isReady() {
-    return this.isRunning && this.dbReady && this.phase === "ready";
+    return (
+      this.isRunning &&
+      this.dbReady &&
+      (this.phase === "ready" || this.phase === "syncing")
+    );
   }
 
   async processBlock(block, db, scanDb) {

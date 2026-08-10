@@ -30,6 +30,9 @@ test("sync status distinguishes initialization, ready and failed states", () => 
   sync.phase = "ready";
   assert.equal(sync.isReady(), true);
 
+  sync.phase = "syncing";
+  assert.equal(sync.isReady(), true);
+
   sync.lastError = { message: "NAS unavailable", height: 12 };
   sync.phase = "retrying";
   assert.deepEqual(sync.getStatus().lastError, {
