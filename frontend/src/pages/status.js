@@ -12,6 +12,10 @@ import {
 } from "@mui/material";
 import NextLink from "next/link";
 import SEO from "../components/SEO";
+import {
+  getEstimatedTimeRemaining,
+  getPipelineSummary,
+} from "../utils/syncStatus.mjs";
 
 const REFRESH_INTERVAL = 5;
 
@@ -92,6 +96,8 @@ export default function Status() {
     if (status.blocksBehind < 100) return "Almost Synced";
     return "Syncing";
   };
+
+  const pipeline = getPipelineSummary(syncStatus);
 
   return (
     <>
@@ -294,6 +300,65 @@ export default function Status() {
                 </Paper>
               </Grid>
             )}
+
+            <Grid size={12}>
+              <Paper sx={{ p: 3 }}>
+                <Typography variant="h6" gutterBottom>
+                  Sync Performance
+                </Typography>
+                <Divider sx={{ mb: 2 }} />
+                <Grid container spacing={2}>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <Typography variant="subtitle2" color="text.secondary">
+                      Throughput
+                    </Typography>
+                    <Typography>
+                      {pipeline
+                        ? `${pipeline.throughput.toFixed(3)} blocks/s`
+                        : "Warming up"}
+                    </Typography>
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <Typography variant="subtitle2" color="text.secondary">
+                      Estimated Remaining
+                    </Typography>
+                    <Typography>
+                      {getEstimatedTimeRemaining(
+                        syncStatus.blocksBehind,
+                        pipeline?.throughput
+                      )}
+                    </Typography>
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <Typography variant="subtitle2" color="text.secondary">
+                      Average Block
+                    </Typography>
+                    <Typography>
+                      {pipeline
+                        ? `${pipeline.averageBlockSeconds.toFixed(1)}s`
+                        : "Warming up"}
+                    </Typography>
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <Typography variant="subtitle2" color="text.secondary">
+                      LevelDB Cache
+                    </Typography>
+                    <Typography>
+                      {syncStatus.storage?.levelDbCacheMb
+                        ? `${syncStatus.storage.levelDbCacheMb} MiB`
+                        : "Default"}
+                    </Typography>
+                  </Grid>
+                  {pipeline && (
+                    <Grid size={12}>
+                      <Typography variant="caption" color="text.secondary">
+                        Main database lookup: {pipeline.mainPrefetchSeconds.toFixed(1)}s average · Commit: {pipeline.commitSeconds.toFixed(1)}s average · {pipeline.samples} measured blocks
+                      </Typography>
+                    </Grid>
+                  )}
+                </Grid>
+              </Paper>
+            </Grid>
 
             {syncStatus.config && (
               <Grid size={12}>
