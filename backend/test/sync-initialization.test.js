@@ -56,6 +56,47 @@ test("tainted outpoint degrees accept legacy and canonical records", () => {
   );
 });
 
+test("coinbase initialization aborts instead of marking partial seeds ready", async () => {
+  const stored = [];
+  const scanDb = {
+    batch() {
+      return {
+        put() {},
+        async write() {},
+      };
+    },
+    async put(key) {
+      stored.push(key);
+    },
+  };
+  const service = new BackgroundSyncService({
+    bitcoinRPC: {
+      async openDatabase() {
+        return scanDb;
+      },
+      async call(method, params) {
+        if (method === "getblockhash" && params[0] === 2) {
+          throw new Error("RPC unavailable");
+        }
+        if (method === "getblockhash") return `hash-${params[0]}`;
+        return {
+          tx: [{ txid: "coinbase", vout: [{ scriptPubKey: {} }] }],
+        };
+      },
+      getAddressFromScript() {
+        return null;
+      },
+    },
+    dbService: {},
+    logger: { info() {}, error() {} },
+    satoshiAddresses: ["seed"],
+    addressMetadata: { seed: { blockHeight: 2 } },
+  });
+
+  await assert.rejects(() => service.initializeCoinbaseOutputs(), /RPC unavailable/);
+  assert.deepEqual(stored, []);
+});
+
 test("coinbase block heights are derived from address metadata", () => {
   const service = new BackgroundSyncService({
     bitcoinRPC: {},

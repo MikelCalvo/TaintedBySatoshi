@@ -155,27 +155,24 @@ class BackgroundSyncService {
           );
         }
 
-        try {
-          const hash = await this.bitcoinRPC.call("getblockhash", [height]);
-          const block = await this.bitcoinRPC.call("getblock", [hash, 2]);
-          const coinbaseTx = block.tx[0];
+        const hash = await this.bitcoinRPC.call("getblockhash", [height]);
+        const block = await this.bitcoinRPC.call("getblock", [hash, 2]);
+        const coinbaseTx = block.tx[0];
 
-          // Mark each coinbase output as tainted
-          for (let voutIndex = 0; voutIndex < coinbaseTx.vout.length; voutIndex++) {
-            const vout = coinbaseTx.vout[voutIndex];
-            const address = this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
-            const outpoint = `${coinbaseTx.txid}:${voutIndex}`;
+        // Mark each coinbase output as tainted. Any failure aborts the full
+        // initialization so the ready marker can never describe partial data.
+        for (let voutIndex = 0; voutIndex < coinbaseTx.vout.length; voutIndex++) {
+          const vout = coinbaseTx.vout[voutIndex];
+          const address = this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
+          const outpoint = `${coinbaseTx.txid}:${voutIndex}`;
 
-            coinbaseBatch.put(`tainted_out:${outpoint}`, {
-              address: address || null,
-              degree: 0,
-              txHash: coinbaseTx.txid,
-              blockHeight: height,
-            });
-            initCount++;
-          }
-        } catch (error) {
-          logger.error(`Error processing block ${height}:`, error.message);
+          coinbaseBatch.put(`tainted_out:${outpoint}`, {
+            address: address || null,
+            degree: 0,
+            txHash: coinbaseTx.txid,
+            blockHeight: height,
+          });
+          initCount++;
         }
       }
 
