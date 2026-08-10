@@ -354,6 +354,46 @@ test("new taint records store one parent edge instead of copying full paths", as
   assert.equal(child.path, undefined);
 });
 
+test("main record prefetch is skipped for untainted blocks", async () => {
+  let mainGetManyCalls = 0;
+  const mainDb = {
+    async getMany() {
+      mainGetManyCalls += 1;
+      return [];
+    },
+    batch() {
+      return { put() {}, async write() {} };
+    },
+  };
+  const scanDb = {
+    async getMany() {
+      return [];
+    },
+  };
+  const service = serviceForProcessing();
+  service.mainDb = mainDb;
+  service.resetBatch();
+
+  const operations = await service.processBlock(
+    {
+      tx: [
+        {
+          txid: "ordinary-tx",
+          vin: [{ txid: "ordinary-parent", vout: 0 }],
+          vout: [
+            { value: 1, scriptPubKey: { address: "ordinary-address" } },
+          ],
+        },
+      ],
+    },
+    mainDb,
+    scanDb
+  );
+
+  assert.deepEqual(operations, []);
+  assert.equal(mainGetManyCalls, 0);
+});
+
 test("database I/O errors are not treated as untainted misses", async () => {
   const scanDb = {
     async getMany() {

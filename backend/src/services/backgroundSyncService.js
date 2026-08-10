@@ -537,18 +537,7 @@ class BackgroundSyncService {
     const blockTxids = new Set(
       block.tx.map((tx) => tx.txid || tx.hash)
     );
-    const blockAddresses = new Set();
-    for (const tx of block.tx) {
-      for (const vout of tx.vout || []) {
-        const address = this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
-        if (address) blockAddresses.add(address);
-      }
-    }
-    const mainRecords = await this.prefetchMainRecords(
-      db,
-      [...blockAddresses],
-      [...blockTxids]
-    );
+    let mainRecords = null;
 
     for (const tx of block.tx) {
       for (const vin of tx.vin || []) {
@@ -608,6 +597,21 @@ class BackgroundSyncService {
       );
       if (goesToSatoshi) minDegree = -1;
       if (!Number.isFinite(minDegree)) continue;
+
+      if (!mainRecords) {
+        const taintedAddresses = [];
+        for (const candidate of block.tx) {
+          for (const vout of candidate.vout || []) {
+            const address = this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
+            if (address) taintedAddresses.push(address);
+          }
+        }
+        mainRecords = await this.prefetchMainRecords(
+          db,
+          [...new Set(taintedAddresses)],
+          [...blockTxids]
+        );
+      }
 
       const currentDegree = minDegree + 1;
       const formattedTx = this.bitcoinRPC.formatTransaction(tx);
