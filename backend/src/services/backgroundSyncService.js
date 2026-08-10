@@ -1011,6 +1011,10 @@ class BackgroundSyncService {
         chunkSize: this.config.chunkSize,
         prefetchConcurrency: this.config.prefetchConcurrency,
       },
+      storage: {
+        levelDbCacheMb:
+          (this.dbService.databaseOptions?.cacheSize || 0) / (1024 * 1024),
+      },
     };
   }
 }

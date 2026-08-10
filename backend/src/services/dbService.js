@@ -2,6 +2,14 @@ const { Level } = require("level");
 const path = require("path");
 const defaultLogger = require("../utils/logger");
 
+function boundedCacheBytes(value) {
+  const parsed = Number.parseInt(value, 10);
+  const megabytes = Number.isInteger(parsed)
+    ? Math.min(Math.max(parsed, 16), 512)
+    : 128;
+  return megabytes * 1024 * 1024;
+}
+
 class DatabaseService {
   constructor(options = {}) {
     this.db = null;
@@ -10,13 +18,15 @@ class DatabaseService {
       options.dbPath ||
       process.env.DB_PATH ||
       path.join(__dirname, "../../data");
+    this.environment = options.environment || process.env;
+    this.databaseOptions = {
+      valueEncoding: "json",
+      createIfMissing: true,
+      cacheSize: boundedCacheBytes(this.environment.LEVELDB_CACHE_MB),
+    };
     this.createDatabase =
       options.createDatabase ||
-      ((dbPath) =>
-        new Level(dbPath, {
-          valueEncoding: "json",
-          createIfMissing: true,
-        }));
+      ((dbPath, databaseOptions) => new Level(dbPath, databaseOptions));
     this.ensureDirectory =
       options.ensureDirectory ||
       ((dbPath) => {
@@ -41,7 +51,7 @@ class DatabaseService {
       try {
         this.ensureDirectory(this.dbPath);
         if (!this.db || this.db.status === "closed") {
-          this.db = this.createDatabase(this.dbPath);
+          this.db = this.createDatabase(this.dbPath, this.databaseOptions);
         }
         if (this.db.status !== "open") {
           await this.db.open();
