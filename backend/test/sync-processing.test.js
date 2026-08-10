@@ -39,6 +39,9 @@ function serviceForProcessing() {
 
 function emptyMainDb() {
   return {
+    async getMany(keys) {
+      return keys.map(() => undefined);
+    },
     async get() {
       throw notFound();
     },

@@ -536,6 +536,18 @@ class BackgroundSyncService {
     const blockTxids = new Set(
       block.tx.map((tx) => tx.txid || tx.hash)
     );
+    const blockAddresses = new Set();
+    for (const tx of block.tx) {
+      for (const vout of tx.vout || []) {
+        const address = this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
+        if (address) blockAddresses.add(address);
+      }
+    }
+    const mainRecords = await this.prefetchMainRecords(
+      db,
+      [...blockAddresses],
+      [...blockTxids]
+    );
 
     for (const tx of block.tx) {
       for (const vin of tx.vin || []) {
@@ -636,7 +648,8 @@ class BackgroundSyncService {
             currentDegree,
             formattedTx,
             db,
-            sourceAddress
+            sourceAddress,
+            mainRecords
           );
         }
       }
@@ -645,25 +658,47 @@ class BackgroundSyncService {
     return scanOperations;
   }
 
+  async prefetchMainRecords(db, addresses, transactionIds) {
+    const keys = [
+      ...addresses.map((address) => `tainted:${address}`),
+      ...transactionIds.map((txid) => `tx:${txid}`),
+    ];
+    const records = new Map();
+    if (keys.length === 0) return records;
+    const values = await db.getMany(keys);
+    keys.forEach((key, index) => records.set(key, values[index]));
+    return records;
+  }
+
   async processAddressInBatch(
     address,
     currentDegree,
     transaction,
     db,
-    sourceAddress = null
+    sourceAddress = null,
+    mainRecords = null
   ) {
-    try {
-      const existing = await db.get(`tainted:${address}`);
-      if (existing && existing.degree <= currentDegree) return;
-    } catch (err) {
-      if (err.code !== "LEVEL_NOT_FOUND") throw err;
+    const addressKey = `tainted:${address}`;
+    let existing;
+    if (mainRecords) {
+      existing = mainRecords.get(addressKey);
+    } else {
+      try {
+        existing = await db.get(addressKey);
+      } catch (err) {
+        if (err.code !== "LEVEL_NOT_FOUND") throw err;
+      }
     }
+    if (existing && existing.degree <= currentDegree) return;
 
     let originalSatoshiAddress = address;
     let parentTinting = null;
 
     if (sourceAddress) {
       parentTinting = this.parentTaintingCache.get(sourceAddress);
+      if (!parentTinting && mainRecords) {
+        parentTinting = mainRecords.get(`tainted:${sourceAddress}`);
+      }
       if (!parentTinting) {
         try {
           parentTinting = await db.get(`tainted:${sourceAddress}`);
@@ -685,11 +720,15 @@ class BackgroundSyncService {
     }
 
     const txKey = `tx:${transaction.hash}`;
-    let transactionExists = false;
-    try {
-      transactionExists = Boolean(await db.get(txKey));
-    } catch (err) {
-      if (err.code !== "LEVEL_NOT_FOUND") throw err;
+    let transactionExists;
+    if (mainRecords) {
+      transactionExists = Boolean(mainRecords.get(txKey));
+    } else {
+      try {
+        transactionExists = Boolean(await db.get(txKey));
+      } catch (err) {
+        if (err.code !== "LEVEL_NOT_FOUND") throw err;
+      }
     }
     if (!transactionExists && !this.safeBatchPut(txKey, {
       hash: transaction.hash,
@@ -720,8 +759,12 @@ class BackgroundSyncService {
       lastUpdated: Date.now(),
     };
 
-    if (!this.safeBatchPut(`tainted:${address}`, taintData)) {
+    if (!this.safeBatchPut(addressKey, taintData)) {
       throw new Error("Main database batch is not writable");
+    }
+    if (mainRecords) {
+      mainRecords.set(addressKey, taintData);
+      mainRecords.set(txKey, transactionExists || transaction);
     }
     this.syncStats.addressesUpdated++;
 
