@@ -520,10 +520,14 @@ class BackgroundSyncService {
   }
 
   isReady() {
+    const caughtUp =
+      Number.isInteger(this.currentHeight) &&
+      Number.isInteger(this.lastProcessedBlock) &&
+      this.currentHeight - this.lastProcessedBlock <= 1;
     return (
       this.isRunning &&
       this.dbReady &&
-      (this.phase === "ready" || this.phase === "syncing")
+      (this.phase === "ready" || (this.phase === "syncing" && caughtUp))
     );
   }
 

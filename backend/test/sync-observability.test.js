@@ -31,7 +31,12 @@ test("sync status distinguishes initialization, ready and failed states", () => 
   assert.equal(sync.isReady(), true);
 
   sync.phase = "syncing";
+  sync.currentHeight = 100;
+  sync.lastProcessedBlock = 99;
   assert.equal(sync.isReady(), true);
+
+  sync.lastProcessedBlock = 90;
+  assert.equal(sync.isReady(), false);
 
   sync.lastError = { message: "NAS unavailable", height: 12 };
   sync.phase = "retrying";
