@@ -677,6 +677,7 @@ class BackgroundSyncService {
       }
     }
 
+    const taintedPlans = [];
     for (const tx of block.tx) {
       const txid = tx.txid || tx.hash;
       const inputDegrees = new Map();
@@ -710,34 +711,7 @@ class BackgroundSyncService {
       if (goesToSatoshi) minDegree = -1;
       if (!Number.isFinite(minDegree)) continue;
 
-      if (!mainRecords) {
-        const taintedAddresses = [];
-        for (const candidate of block.tx) {
-          for (const vout of candidate.vout || []) {
-            const address = this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
-            if (address) taintedAddresses.push(address);
-          }
-        }
-        const uniqueTaintedAddresses = [...new Set(taintedAddresses)];
-        const transactionIds = [...blockTxids];
-        const mainPrefetchStartedAt = this.now();
-        mainRecords = await this.prefetchMainRecords(
-          db,
-          uniqueTaintedAddresses,
-          transactionIds
-        );
-        if (this.activeBlockMetrics) {
-          this.activeBlockMetrics.mainPrefetchMs +=
-            this.now() - mainPrefetchStartedAt;
-          this.activeBlockMetrics.mainPrefetchKeys =
-            uniqueTaintedAddresses.length + transactionIds.length;
-        }
-      }
-
       const currentDegree = minDegree + 1;
-      if (this.activeBlockMetrics) {
-        this.activeBlockMetrics.taintedTransactions++;
-      }
       const formattedTx = this.bitcoinRPC.formatTransaction(tx);
       let sourceAddress = null;
 
@@ -763,30 +737,71 @@ class BackgroundSyncService {
         if (sourceAddress) break;
       }
 
-      // New txid:vout pairs are unique in a chronological scan. Replays are
-      // safe because LevelDB puts are idempotent and address writes retain the
-      // existing shortest path.
       for (const output of outputs) {
-        if (this.activeBlockMetrics) {
-          this.activeBlockMetrics.taintedOutputs++;
-        }
         const outpoint = `${txid}:${output.index}`;
-        scanOperations.push({
-          key: `tainted_out:${outpoint}`,
-          value: { degree: currentDegree, address: output.address || null },
-        });
         blockTaintedOutpoints.set(outpoint, {
           degree: currentDegree,
           address: output.address || null,
+        });
+      }
+      taintedPlans.push({
+        txid,
+        currentDegree,
+        formattedTx,
+        sourceAddress,
+        outputs,
+      });
+    }
+
+    if (taintedPlans.length === 0) return scanOperations;
+
+    const mainAddressKeys = new Set();
+    const taintedTransactionIds = [];
+    for (const plan of taintedPlans) {
+      taintedTransactionIds.push(plan.txid);
+      if (plan.sourceAddress) mainAddressKeys.add(plan.sourceAddress);
+      for (const output of plan.outputs) {
+        if (output.address) mainAddressKeys.add(output.address);
+      }
+    }
+    const mainPrefetchStartedAt = this.now();
+    mainRecords = await this.prefetchMainRecords(
+      db,
+      [...mainAddressKeys],
+      taintedTransactionIds
+    );
+    if (this.activeBlockMetrics) {
+      this.activeBlockMetrics.mainPrefetchMs +=
+        this.now() - mainPrefetchStartedAt;
+      this.activeBlockMetrics.mainPrefetchKeys =
+        mainAddressKeys.size + taintedTransactionIds.length;
+      this.activeBlockMetrics.taintedTransactions = taintedPlans.length;
+    }
+
+    for (const plan of taintedPlans) {
+      // New txid:vout pairs are unique in a chronological scan. Replays are
+      // safe because LevelDB puts are idempotent and address writes retain the
+      // existing shortest path.
+      for (const output of plan.outputs) {
+        if (this.activeBlockMetrics) {
+          this.activeBlockMetrics.taintedOutputs++;
+        }
+        const outpoint = `${plan.txid}:${output.index}`;
+        scanOperations.push({
+          key: `tainted_out:${outpoint}`,
+          value: {
+            degree: plan.currentDegree,
+            address: output.address || null,
+          },
         });
 
         if (output.address) {
           await this.processAddressInBatch(
             output.address,
-            currentDegree,
-            formattedTx,
+            plan.currentDegree,
+            plan.formattedTx,
             db,
-            sourceAddress,
+            plan.sourceAddress,
             mainRecords
           );
         }

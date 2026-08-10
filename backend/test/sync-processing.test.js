@@ -394,6 +394,125 @@ test("main record prefetch is skipped for untainted blocks", async () => {
   assert.equal(mainGetManyCalls, 0);
 });
 
+test("main prefetch reads only tainted outputs and their parents", async () => {
+  const requestedMainKeys = [];
+  const queued = [];
+  const mainDb = {
+    async getMany(keys) {
+      requestedMainKeys.push(keys);
+      return keys.map((key) =>
+        key === "tainted:parent-address"
+          ? { originalSatoshiAddress: "seed-address", degree: 2 }
+          : undefined
+      );
+    },
+    async get() {
+      throw new Error("targeted prefetch should avoid point reads");
+    },
+    batch() {
+      return {
+        put(key, value) {
+          queued.push({ key, value });
+        },
+        async write() {},
+      };
+    },
+  };
+  const scanDb = {
+    async getMany() {
+      return [{ degree: 2, address: "parent-address" }];
+    },
+  };
+  const service = serviceForProcessing();
+  service.mainDb = mainDb;
+  service.resetBatch();
+
+  await service.processBlock(
+    {
+      tx: [
+        {
+          txid: "tainted-child",
+          vin: [{ txid: "parent", vout: 0 }],
+          vout: [
+            { value: 1, scriptPubKey: { address: "tainted-output" } },
+          ],
+        },
+        {
+          txid: "ordinary-child",
+          vin: [{ txid: "ordinary-parent", vout: 0 }],
+          vout: [
+            { value: 1, scriptPubKey: { address: "ordinary-output" } },
+          ],
+        },
+      ],
+    },
+    mainDb,
+    scanDb
+  );
+
+  assert.deepEqual(requestedMainKeys, [
+    [
+      "tainted:parent-address",
+      "tainted:tainted-output",
+      "tx:tainted-child",
+    ],
+  ]);
+  assert.equal(
+    queued.some((operation) => operation.key === "tainted:ordinary-output"),
+    false
+  );
+});
+
+test("same-block parent records are resolved from the shared main cache", async () => {
+  let pointReads = 0;
+  const mainDb = {
+    async getMany(keys) {
+      return keys.map(() => undefined);
+    },
+    async get() {
+      pointReads++;
+      throw new Error("same-block parents should already be cached");
+    },
+    batch() {
+      return { put() {}, async write() {} };
+    },
+  };
+  const scanDb = {
+    async getMany() {
+      return [];
+    },
+  };
+  const service = serviceForProcessing();
+  service.mainDb = mainDb;
+  service.resetBatch();
+
+  const operations = await service.processBlock(
+    {
+      tx: [
+        {
+          txid: "seed-tx",
+          vin: [{ coinbase: "00" }],
+          vout: [
+            { value: 50, scriptPubKey: { address: "seed-address" } },
+          ],
+        },
+        {
+          txid: "child-tx",
+          vin: [{ txid: "seed-tx", vout: 0 }],
+          vout: [
+            { value: 49, scriptPubKey: { address: "child-address" } },
+          ],
+        },
+      ],
+    },
+    mainDb,
+    scanDb
+  );
+
+  assert.equal(pointReads, 0);
+  assert.equal(operations.length, 2);
+});
+
 test("block processing records NAS lookup stages and parent point reads", async () => {
   let now = 0;
   const mainDb = {
@@ -454,7 +573,7 @@ test("block processing records NAS lookup stages and parent point reads", async 
     parentLookupMs: 13,
     parentPointReads: 1,
     externalOutpoints: 1,
-    mainPrefetchKeys: 2,
+    mainPrefetchKeys: 3,
     taintedTransactions: 1,
     taintedOutputs: 1,
     addressWrites: 1,
