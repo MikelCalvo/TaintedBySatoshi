@@ -33,6 +33,12 @@ class BackgroundSyncService {
     }
     this.isRunning = false;
     this.isSyncing = false;
+    this.phase = "stopped";
+    this.lastError = null;
+    this.currentBlock = null;
+    this.activeSync = null;
+    this.committedBlocks = [];
+    this.durableCheckpoint = { height: null, hash: null, updatedAt: null };
     this.syncInterval = null;
     this.lastProcessedBlock = null;
     this.currentHeight = null;
@@ -83,6 +89,7 @@ class BackgroundSyncService {
 
     this.starting = (async () => {
       this.isRunning = true;
+      this.phase = "initializing";
       this.logger.info("Background sync service initializing...");
 
       try {
@@ -92,10 +99,13 @@ class BackgroundSyncService {
           : () => this.ensureInitialized();
         await initialize();
         this.dbReady = true;
+        this.phase = "ready";
       } catch (error) {
         this.logger.error("Failed to initialize background sync:", error.message);
         this.isRunning = false;
         this.dbReady = false;
+        this.phase = "failed";
+        this.lastError = { message: error.message, timestamp: Date.now() };
         throw error;
       }
 
@@ -324,11 +334,17 @@ class BackgroundSyncService {
       this.syncInterval = null;
     }
 
-    // Flush any pending batch
+    if (this.activeSync) {
+      await this.activeSync;
+    }
+
     await this.flushBatch();
+    await this.dbService.close?.();
+    await this.bitcoinRPC.closeDatabase?.();
     this.batchIsValid = false;
     this.mainDb = null;
     this.dbReady = false;
+    this.phase = "stopped";
 
     logger.info("Background sync service stopped");
   }
@@ -346,6 +362,7 @@ class BackgroundSyncService {
 
     try {
       this.isSyncing = true;
+      this.phase = "syncing";
 
       // Get current blockchain height
       const blockchainInfo = await this.bitcoinRPC.getBlockchainInfo();
@@ -376,7 +393,8 @@ class BackgroundSyncService {
 
         logger.info(`[Background Sync] Processing chunk: blocks ${startBlock}-${endBlock} (${remainingBlocks.toLocaleString()} remaining)`);
 
-        await this.syncNewBlocks(startBlock, endBlock, scanDb);
+        this.activeSync = this.syncNewBlocks(startBlock, endBlock, scanDb);
+        await this.activeSync;
       } else {
         // No new blocks, just update stats
         this.syncStats.lastSyncTime = new Date().toISOString();
@@ -384,8 +402,16 @@ class BackgroundSyncService {
     } catch (error) {
       logger.error("[Background Sync] Error during sync check:", error.message);
       this.syncStats.errors++;
+      this.phase = "retrying";
+      this.lastError = {
+        message: error.message,
+        height: this.currentBlock,
+        timestamp: Date.now(),
+      };
     } finally {
+      this.activeSync = null;
       this.isSyncing = false;
+      if (this.phase === "syncing") this.phase = "ready";
     }
   }
 
@@ -414,6 +440,7 @@ class BackgroundSyncService {
           );
 
       for (const { height, hash, block } of prefetched) {
+        this.currentBlock = height;
         this.resetBatch();
         const scanOperations = (await this.processBlock(block, db, scanDb)) || [];
 
@@ -436,7 +463,7 @@ class BackgroundSyncService {
 
         processedBlocks++;
         this.syncStats.blocksProcessed++;
-        this.lastProcessedBlock = height;
+        this.recordCommittedBlock(height, hash);
       }
 
       this.syncStats.lastSyncTime = new Date().toISOString();
@@ -449,6 +476,21 @@ class BackgroundSyncService {
     } finally {
       this.mainDb = null;
     }
+  }
+
+  recordCommittedBlock(height, hash, timestamp = Date.now()) {
+    this.lastProcessedBlock = height;
+    this.durableCheckpoint = {
+      height,
+      hash,
+      updatedAt: timestamp,
+    };
+    this.committedBlocks.push({ height, timestamp });
+    if (this.committedBlocks.length > 1000) this.committedBlocks.shift();
+  }
+
+  isReady() {
+    return this.isRunning && this.dbReady && this.phase === "ready";
   }
 
   async processBlock(block, db, scanDb) {
@@ -698,12 +740,25 @@ class BackgroundSyncService {
       : null;
 
     return {
+      phase: this.phase,
       isRunning: this.isRunning,
       isSyncing: this.isSyncing,
       lastProcessedBlock: this.lastProcessedBlock,
       currentHeight: this.currentHeight,
       blocksBehind,
       progress: progress !== null ? `${progress}%` : null,
+      currentBlock: this.currentBlock,
+      durableCheckpoint: this.durableCheckpoint,
+      lastError: this.lastError,
+      metrics: {
+        blocksPerSecond:
+          this.committedBlocks.length >= 2
+            ? (this.committedBlocks.length - 1) /
+              ((this.committedBlocks.at(-1).timestamp -
+                this.committedBlocks[0].timestamp) /
+                1000)
+            : 0,
+      },
       stats: this.syncStats,
       config: {
         syncInterval: this.config.syncInterval,

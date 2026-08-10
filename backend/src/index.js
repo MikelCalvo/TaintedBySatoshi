@@ -54,6 +54,7 @@ const generalLimiter = rateLimit({
     // Exclude lightweight status endpoints from rate limiting
     return req.path === "/api/sync-status" ||
            req.path === "/api/health" ||
+           req.path === "/api/readiness" ||
            req.path === "/api/analytics/stats";
   },
 });
@@ -123,24 +124,24 @@ if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
 
-// Health check endpoint
+// Liveness reports only whether the HTTP process can respond.
 app.get("/api/health", (req, res) => {
-  try {
-    res.json({
-      status: "healthy",
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-    });
-  } catch (error) {
-    logger.error("Health check failed", { error: error.message });
-    res.status(500).json({
-      status: "unhealthy",
-      error:
-        process.env.NODE_ENV === "development"
-          ? error.message
-          : "Internal server error",
-    });
-  }
+  res.json({
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
+});
+
+// Readiness includes database and background-sync initialization.
+app.get("/api/readiness", (req, res) => {
+  const status = backgroundSyncService.getStatus();
+  const ready = backgroundSyncService.isReady();
+  res.status(ready ? 200 : 503).json({
+    status: ready ? "ready" : "not_ready",
+    phase: status.phase,
+    lastError: status.lastError,
+  });
 });
 
 // Add error handling middleware
@@ -315,7 +316,7 @@ process.on('uncaughtException', (error) => {
   }
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
   logger.info(`Health check: http://localhost:${PORT}/api/health`);
   logger.info(`Sync status: http://localhost:${PORT}/api/sync-status`);
@@ -340,3 +341,29 @@ app.listen(PORT, () => {
     }
   });
 });
+
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info(`Received ${signal}, shutting down gracefully`);
+
+  server.close(async (closeError) => {
+    if (closeError) {
+      logger.error("HTTP server shutdown failed", { error: closeError.message });
+    }
+    try {
+      await backgroundSyncService.stop();
+      await analyticsService.stop?.();
+      process.exit(closeError ? 1 : 0);
+    } catch (error) {
+      logger.error("Graceful shutdown failed", { error: error.message });
+      process.exit(1);
+    }
+  });
+
+  setTimeout(() => process.exit(1), 30000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
