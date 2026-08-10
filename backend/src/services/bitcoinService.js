@@ -3,10 +3,12 @@ const logger = require("../utils/logger");
 
 // Load Satoshi addresses with error handling
 let SATOSHI_ADDRESSES = [];
+let SATOSHI_ADDRESS_SET = new Set();
 let SATOSHI_NOTES = {};
 try {
   const satoshiData = require("../../data/satoshiAddresses");
   SATOSHI_ADDRESSES = satoshiData.SATOSHI_ADDRESSES || [];
+  SATOSHI_ADDRESS_SET = new Set(SATOSHI_ADDRESSES);
   SATOSHI_NOTES = satoshiData.SATOSHI_NOTES || {};
 } catch (err) {
   // File doesn't exist yet - will be created by initialization
@@ -20,7 +22,7 @@ async function checkAddressConnection(address) {
     db = await dbService.init();
 
     // Quick check for Satoshi's addresses
-    if (SATOSHI_ADDRESSES.includes(address)) {
+    if (SATOSHI_ADDRESS_SET.has(address)) {
       return {
         isConnected: true,
         isSatoshiAddress: true,

@@ -434,251 +434,200 @@ class BackgroundSyncService {
   }
 
   async processBlock(block, db, scanDb) {
-    const callbackPromises = [];
     const scanOperations = [];
     const blockTaintedOutpoints = new Map();
+    const externalOutpoints = [];
+    const seenExternalOutpoints = new Set();
+    const blockTxids = new Set(
+      block.tx.map((tx) => tx.txid || tx.hash)
+    );
 
     for (const tx of block.tx) {
-      const txid = tx.txid || tx.hash;
-      let isTaintSpreading = false;
-      let minDegree = Infinity;
-
-      // 1. Check if any input spends a tainted output
-      for (const vin of tx.vin) {
-        if (vin.coinbase) continue;
+      for (const vin of tx.vin || []) {
+        if (vin.coinbase || blockTxids.has(vin.txid)) continue;
         const outpoint = `${vin.txid}:${vin.vout}`;
-
-        // First check if it was tainted in this block
-        if (blockTaintedOutpoints.has(outpoint)) {
-          const degree = blockTaintedOutpoints.get(outpoint);
-          isTaintSpreading = true;
-          if (degree < minDegree) {
-            minDegree = degree;
-          }
-        } else {
-          // Check DB for tainted outpoint
-          try {
-            const degree = normalizeTaintedDegree(
-              await scanDb.get(`tainted_out:${outpoint}`)
-            );
-            if (degree !== undefined && degree !== null) {
-              isTaintSpreading = true;
-              if (degree < minDegree) {
-                minDegree = degree;
-              }
-            }
-          } catch (e) {
-            // Not tainted, continue
-          }
-        }
-      }
-
-      // 2. Check if any output goes to a known Satoshi address
-      const outputs = tx.vout
-        .map((vout, index) => ({
-          index,
-          address: this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey),
-          value: vout.value,
-        }))
-        .filter((o) => o.address);
-
-      const goesToSatoshi = outputs.some((o) =>
-        SATOSHI_ADDRESS_SET.has(o.address)
-      );
-      if (goesToSatoshi) {
-        isTaintSpreading = true;
-        minDegree = -1; // Use -1 so that currentDegree = 0 (seed)
-      }
-
-      if (isTaintSpreading) {
-        const currentDegree = minDegree + 1;
-        const formattedTx = this.bitcoinRPC.formatTransaction(tx);
-
-        // Find source address from tainted inputs
-        let sourceAddress = null;
-        for (const vin of tx.vin) {
-          if (vin.coinbase) continue;
-          const outpoint = `${vin.txid}:${vin.vout}`;
-          
-          // Check if this input is tainted
-          let inputDegree = null;
-          if (blockTaintedOutpoints.has(outpoint)) {
-            inputDegree = blockTaintedOutpoints.get(outpoint);
-          } else {
-            try {
-              inputDegree = normalizeTaintedDegree(
-                await scanDb.get(`tainted_out:${outpoint}`)
-              );
-            } catch (e) {
-              // Not tainted
-            }
-          }
-
-          // If this input is tainted and has the minimum degree, use it as source
-          if (inputDegree !== null && inputDegree === minDegree) {
-            // Try to get address from prevout
-            if (vin.prevout && vin.prevout.scriptPubKey) {
-              sourceAddress = this.bitcoinRPC.getAddressFromScript(vin.prevout.scriptPubKey);
-            } else if (formattedTx.inputs && formattedTx.inputs.length > 0) {
-              // Fallback to formatted transaction inputs
-              const input = formattedTx.inputs.find(
-                (inp) => inp.prev_out && inp.prev_out.addr
-              );
-              if (input) {
-                sourceAddress = input.prev_out.addr;
-              }
-            }
-            if (sourceAddress) break; // Found source, stop looking
-          }
-        }
-
-        // Process ALL outputs
-        for (let index = 0; index < tx.vout.length; index++) {
-          const vout = tx.vout[index];
-          const outpoint = `${txid}:${index}`;
-
-          // Check if outpoint is already tainted
-          let alreadyTainted = blockTaintedOutpoints.has(outpoint);
-
-          if (!alreadyTainted) {
-            try {
-              const degree = normalizeTaintedDegree(
-                await scanDb.get(`tainted_out:${outpoint}`)
-              );
-              if (degree !== undefined && degree !== null) {
-                alreadyTainted = true;
-              }
-            } catch (e) {
-              alreadyTainted = false;
-            }
-          }
-
-          if (!alreadyTainted) {
-            const address = this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
-
-            scanOperations.push({
-              key: `tainted_out:${outpoint}`,
-              value: currentDegree,
-            });
-            blockTaintedOutpoints.set(outpoint, currentDegree);
-
-            // Process address if we have one
-            if (address) {
-              callbackPromises.push(
-                this.processAddressInBatch(
-                  address,
-                  currentDegree,
-                  formattedTx,
-                  db,
-                  sourceAddress
-                )
-              );
-            }
-          }
+        if (!seenExternalOutpoints.has(outpoint)) {
+          seenExternalOutpoints.add(outpoint);
+          externalOutpoints.push(outpoint);
         }
       }
     }
 
-    // Execute address processing callbacks
-    if (callbackPromises.length > 0) {
-      await Promise.all(callbackPromises);
+    const externalDegrees = new Map();
+    if (externalOutpoints.length > 0) {
+      const keys = externalOutpoints.map((outpoint) => `tainted_out:${outpoint}`);
+      const values = await scanDb.getMany(keys);
+      for (let index = 0; index < externalOutpoints.length; index++) {
+        const value = values[index];
+        if (value !== undefined) {
+          externalDegrees.set(
+            externalOutpoints[index],
+            normalizeTaintedDegree(value)
+          );
+        }
+      }
+    }
+
+    for (const tx of block.tx) {
+      const txid = tx.txid || tx.hash;
+      const inputDegrees = new Map();
+      let minDegree = Infinity;
+
+      for (const vin of tx.vin || []) {
+        if (vin.coinbase) continue;
+        const outpoint = `${vin.txid}:${vin.vout}`;
+        const degree = blockTaintedOutpoints.has(outpoint)
+          ? blockTaintedOutpoints.get(outpoint)
+          : externalDegrees.get(outpoint);
+        if (degree !== undefined) {
+          inputDegrees.set(outpoint, degree);
+          minDegree = Math.min(minDegree, degree);
+        }
+      }
+
+      const outputs = (tx.vout || []).map((vout, index) => ({
+        index,
+        address: this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey),
+        value: vout.value,
+      }));
+      const goesToSatoshi = outputs.some(
+        (output) => output.address && SATOSHI_ADDRESS_SET.has(output.address)
+      );
+      if (goesToSatoshi) minDegree = -1;
+      if (!Number.isFinite(minDegree)) continue;
+
+      const currentDegree = minDegree + 1;
+      const formattedTx = this.bitcoinRPC.formatTransaction(tx);
+      let sourceAddress = null;
+
+      for (const vin of tx.vin || []) {
+        if (vin.coinbase) continue;
+        const outpoint = `${vin.txid}:${vin.vout}`;
+        if (inputDegrees.get(outpoint) !== minDegree) continue;
+        if (vin.prevout?.scriptPubKey) {
+          sourceAddress = this.bitcoinRPC.getAddressFromScript(
+            vin.prevout.scriptPubKey
+          );
+        } else {
+          const input = formattedTx.inputs?.find(
+            (candidate) => candidate.prev_out?.addr
+          );
+          sourceAddress = input?.prev_out?.addr || null;
+        }
+        if (sourceAddress) break;
+      }
+
+      // New txid:vout pairs are unique in a chronological scan. Replays are
+      // safe because LevelDB puts are idempotent and address writes retain the
+      // existing shortest path.
+      for (const output of outputs) {
+        const outpoint = `${txid}:${output.index}`;
+        scanOperations.push({
+          key: `tainted_out:${outpoint}`,
+          value: currentDegree,
+        });
+        blockTaintedOutpoints.set(outpoint, currentDegree);
+
+        if (output.address) {
+          await this.processAddressInBatch(
+            output.address,
+            currentDegree,
+            formattedTx,
+            db,
+            sourceAddress
+          );
+        }
+      }
     }
 
     return scanOperations;
   }
 
-  async processAddressInBatch(address, currentDegree, transaction, db, sourceAddress = null) {
+  async processAddressInBatch(
+    address,
+    currentDegree,
+    transaction,
+    db,
+    sourceAddress = null
+  ) {
     try {
-      // Check if we already have a shorter path
-      try {
-        const existing = await db.get(`tainted:${address}`);
-        if (existing.degree <= currentDegree) {
-          return; // Skip if we already have a shorter or equal path
-        }
-      } catch (err) {
-        // Address not yet tainted, proceed
-      }
-
-      let path = [];
-      let originalSatoshiAddress = address;
-
-      // Try to get parent tainting info from sourceAddress
-      let parentTinting = null;
-      if (sourceAddress) {
-        // Try cache first
-        parentTinting = this.parentTaintingCache.get(sourceAddress);
-        if (!parentTinting) {
-          try {
-            parentTinting = await db.get(`tainted:${sourceAddress}`);
-            // Cache it
-            if (this.parentTaintingCache.size > 10000) {
-              const firstKey = this.parentTaintingCache.keys().next().value;
-              this.parentTaintingCache.delete(firstKey);
-            }
-            this.parentTaintingCache.set(sourceAddress, parentTinting);
-          } catch (err) {
-            // Parent not found
-          }
-        }
-      }
-
-      if (parentTinting) {
-        originalSatoshiAddress = parentTinting.originalSatoshiAddress;
-        const output = transaction.out.find((o) => o.addr === address);
-        const amount = output ? output.value : 0;
-        path = [
-          ...parentTinting.path,
-          {
-            from: sourceAddress,
-            to: address,
-            txHash: transaction.hash,
-            amount: amount,
-          },
-        ];
-      } else if (SATOSHI_ADDRESS_SET.has(address)) {
-        originalSatoshiAddress = address;
-      }
-
-      // Store transaction in batch (if not already stored)
-      const txKey = `tx:${transaction.hash}`;
-      try {
-        await db.get(txKey);
-      } catch (err) {
-        this.safeBatchPut(txKey, {
-          hash: transaction.hash,
-          time: transaction.time,
-          inputs: transaction.inputs,
-          outputs: transaction.out,
-          degree: currentDegree,
-        });
-      }
-
-      // Store tainting information in batch
-      const taintData = {
-        txHash: transaction.hash,
-        originalSatoshiAddress,
-        amount: transaction.out.find((o) => o.addr === address)?.value || 0,
-        degree: currentDegree,
-        path,
-        lastUpdated: Date.now(),
-      };
-
-      if (this.safeBatchPut(`tainted:${address}`, taintData)) {
-        this.syncStats.addressesUpdated++;
-      }
-
-      // Update cache
-      if (this.parentTaintingCache.size <= 10000) {
-        this.parentTaintingCache.set(address, taintData);
-      } else {
-        // Remove oldest entry
-        const firstKey = this.parentTaintingCache.keys().next().value;
-        this.parentTaintingCache.delete(firstKey);
-        this.parentTaintingCache.set(address, taintData);
-      }
-    } catch (error) {
-      logger.error(`[Background Sync] Error processing address ${address}:`, error.message);
+      const existing = await db.get(`tainted:${address}`);
+      if (existing.degree <= currentDegree) return;
+    } catch (err) {
+      if (err.code !== "LEVEL_NOT_FOUND") throw err;
     }
+
+    let path = [];
+    let originalSatoshiAddress = address;
+    let parentTinting = null;
+
+    if (sourceAddress) {
+      parentTinting = this.parentTaintingCache.get(sourceAddress);
+      if (!parentTinting) {
+        try {
+          parentTinting = await db.get(`tainted:${sourceAddress}`);
+          if (this.parentTaintingCache.size > 10000) {
+            const firstKey = this.parentTaintingCache.keys().next().value;
+            this.parentTaintingCache.delete(firstKey);
+          }
+          this.parentTaintingCache.set(sourceAddress, parentTinting);
+        } catch (err) {
+          if (err.code !== "LEVEL_NOT_FOUND") throw err;
+        }
+      }
+    }
+
+    if (parentTinting) {
+      originalSatoshiAddress = parentTinting.originalSatoshiAddress;
+      const output = transaction.out.find((candidate) => candidate.addr === address);
+      path = [
+        ...parentTinting.path,
+        {
+          from: sourceAddress,
+          to: address,
+          txHash: transaction.hash,
+          amount: output?.value || 0,
+        },
+      ];
+    } else if (SATOSHI_ADDRESS_SET.has(address)) {
+      originalSatoshiAddress = address;
+    }
+
+    const txKey = `tx:${transaction.hash}`;
+    try {
+      await db.get(txKey);
+    } catch (err) {
+      if (err.code !== "LEVEL_NOT_FOUND") throw err;
+      if (!this.safeBatchPut(txKey, {
+        hash: transaction.hash,
+        time: transaction.time,
+        inputs: transaction.inputs,
+        outputs: transaction.out,
+        degree: currentDegree,
+      })) {
+        throw new Error("Main database batch is not writable");
+      }
+    }
+
+    const taintData = {
+      txHash: transaction.hash,
+      originalSatoshiAddress,
+      amount: transaction.out.find((candidate) => candidate.addr === address)?.value || 0,
+      degree: currentDegree,
+      path,
+      lastUpdated: Date.now(),
+    };
+
+    if (!this.safeBatchPut(`tainted:${address}`, taintData)) {
+      throw new Error("Main database batch is not writable");
+    }
+    this.syncStats.addressesUpdated++;
+
+    if (this.parentTaintingCache.size > 10000) {
+      const firstKey = this.parentTaintingCache.keys().next().value;
+      this.parentTaintingCache.delete(firstKey);
+    }
+    this.parentTaintingCache.set(address, taintData);
   }
 
   resetBatch() {
@@ -703,7 +652,7 @@ class BackgroundSyncService {
       // Batch became invalid (closed/written)
       logger.error("[Background Sync] Batch operation failed, marking batch as invalid:", error.message);
       this.batchIsValid = false;
-      return false;
+      throw error;
     }
   }
 
