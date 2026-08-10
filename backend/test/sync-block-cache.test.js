@@ -23,7 +23,7 @@ function createService() {
   return service;
 }
 
-test("main prefetch reads address records separately from transaction records", async () => {
+test("main prefetch reads only address records", async () => {
   const calls = [];
   const db = {
     async getMany(keys) {
@@ -41,9 +41,8 @@ test("main prefetch reads address records separately from transaction records", 
 
   assert.deepEqual(calls, [
     ["tainted:address-a", "tainted:address-b"],
-    ["tx:tx-a", "tx:tx-b"],
   ]);
-  assert.equal(cache.size, 4);
+  assert.equal(cache.size, 2);
 });
 
 test("block-local address and transaction caches avoid repeated NAS reads", async () => {
@@ -90,6 +89,54 @@ test("block-local address and transaction caches avoid repeated NAS reads", asyn
     cache
   );
 
-  assert.equal(getManyCalls, 2);
+  assert.equal(getManyCalls, 1);
   assert.equal(pointGets, 0);
+});
+
+test("transaction writes are deduplicated in the block cache without NAS reads", async () => {
+  const queued = [];
+  const db = {
+    async getMany(keys) {
+      return keys.map(() => undefined);
+    },
+    async get() {
+      throw new Error("transaction existence must not use a point read");
+    },
+    batch() {
+      return {
+        put(key) {
+          queued.push(key);
+        },
+        async write() {},
+      };
+    },
+  };
+  const service = createService();
+  service.mainDb = db;
+  service.resetBatch();
+  const cache = await service.prefetchMainRecords(
+    db,
+    ["address-a", "address-b"],
+    ["tx-a"]
+  );
+  const transaction = { hash: "tx-a", time: 1, inputs: [], out: [] };
+
+  await service.processAddressInBatch(
+    "address-a",
+    2,
+    transaction,
+    db,
+    null,
+    cache
+  );
+  await service.processAddressInBatch(
+    "address-b",
+    2,
+    transaction,
+    db,
+    null,
+    cache
+  );
+
+  assert.equal(queued.filter((key) => key === "tx:tx-a").length, 1);
 });

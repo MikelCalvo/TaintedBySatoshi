@@ -455,7 +455,6 @@ test("main prefetch reads only tainted outputs and their parents", async () => {
       "tainted:parent-address",
       "tainted:tainted-output",
     ],
-    ["tx:tainted-child"],
   ]);
   assert.equal(
     queued.some((operation) => operation.key === "tainted:ordinary-output"),
@@ -569,11 +568,11 @@ test("block processing records NAS lookup stages and parent point reads", async 
 
   assert.deepEqual(service.activeBlockMetrics, {
     inputLookupMs: 7,
-    mainPrefetchMs: 22,
+    mainPrefetchMs: 11,
     parentLookupMs: 13,
     parentPointReads: 1,
     externalOutpoints: 1,
-    mainPrefetchKeys: 3,
+    mainPrefetchKeys: 2,
     taintedTransactions: 1,
     taintedOutputs: 1,
     addressWrites: 1,

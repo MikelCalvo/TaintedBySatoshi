@@ -756,9 +756,7 @@ class BackgroundSyncService {
     if (taintedPlans.length === 0) return scanOperations;
 
     const mainAddressKeys = new Set();
-    const taintedTransactionIds = [];
     for (const plan of taintedPlans) {
-      taintedTransactionIds.push(plan.txid);
       if (plan.sourceAddress) mainAddressKeys.add(plan.sourceAddress);
       for (const output of plan.outputs) {
         if (output.address) mainAddressKeys.add(output.address);
@@ -767,14 +765,13 @@ class BackgroundSyncService {
     const mainPrefetchStartedAt = this.now();
     mainRecords = await this.prefetchMainRecords(
       db,
-      [...mainAddressKeys],
-      taintedTransactionIds
+      [...mainAddressKeys]
     );
     if (this.activeBlockMetrics) {
       this.activeBlockMetrics.mainPrefetchMs +=
         this.now() - mainPrefetchStartedAt;
       this.activeBlockMetrics.mainPrefetchKeys =
-        mainAddressKeys.size + taintedTransactionIds.length;
+        mainAddressKeys.size;
       this.activeBlockMetrics.taintedTransactions = taintedPlans.length;
     }
 
@@ -811,20 +808,13 @@ class BackgroundSyncService {
     return scanOperations;
   }
 
-  async prefetchMainRecords(db, addresses, transactionIds) {
+  async prefetchMainRecords(db, addresses) {
     const records = new Map();
     const addressKeys = addresses.map((address) => `tainted:${address}`);
     if (addressKeys.length > 0) {
       const addressValues = await db.getMany(addressKeys);
       addressKeys.forEach((key, index) =>
         records.set(key, addressValues[index])
-      );
-    }
-    const transactionKeys = transactionIds.map((txid) => `tx:${txid}`);
-    if (transactionKeys.length > 0) {
-      const transactionValues = await db.getMany(transactionKeys);
-      transactionKeys.forEach((key, index) =>
-        records.set(key, transactionValues[index])
       );
     }
     return records;
@@ -886,10 +876,8 @@ class BackgroundSyncService {
     }
 
     const txKey = `tx:${transaction.hash}`;
-    let transactionExists;
-    if (mainRecords) {
-      transactionExists = Boolean(mainRecords.get(txKey));
-    } else {
+    let transactionExists = mainRecords?.has(txKey) || false;
+    if (!mainRecords) {
       try {
         transactionExists = Boolean(await db.get(txKey));
       } catch (err) {
@@ -933,7 +921,7 @@ class BackgroundSyncService {
     }
     if (mainRecords) {
       mainRecords.set(addressKey, taintData);
-      mainRecords.set(txKey, transactionExists || transaction);
+      mainRecords.set(txKey, transaction);
     }
     this.syncStats.addressesUpdated++;
 
