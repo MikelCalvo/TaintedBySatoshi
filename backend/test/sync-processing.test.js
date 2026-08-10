@@ -97,6 +97,55 @@ test("block processing uses one multiget for unique external inputs", async () =
   ]);
 });
 
+test("source addresses are resolved from the same batch tx when prevout is absent", async () => {
+  const mainDb = emptyMainDb();
+  const scanDb = {
+    async getMany() {
+      return [];
+    },
+  };
+  const service = serviceForProcessing();
+  service.mainDb = mainDb;
+  service.resetBatch();
+  const calls = [];
+  service.processAddressInBatch = async (...args) => calls.push(args);
+  service.bitcoinRPC.formatTransaction = (tx) => ({
+    hash: tx.txid,
+    time: 1,
+    inputs: [],
+    out: (tx.vout || []).map((vout) => ({
+      addr: vout.scriptPubKey.address,
+      value: vout.value,
+    })),
+  });
+
+  await service.processBlock(
+    {
+      tx: [
+        {
+          txid: "seed-tx",
+          vin: [],
+          vout: [
+            { value: 50, scriptPubKey: { address: "seed-address" } },
+          ],
+        },
+        {
+          txid: "child-tx",
+          vin: [{ txid: "seed-tx", vout: 0 }],
+          vout: [
+            { value: 49, scriptPubKey: { address: "child-address" } },
+          ],
+        },
+      ],
+    },
+    mainDb,
+    scanDb
+  );
+
+  const childCall = calls.find((args) => args[0] === "child-address");
+  assert.equal(childCall[4], "seed-address");
+});
+
 test("new chronological outputs are written without existence point reads", async () => {
   let getCalls = 0;
   const scanDb = {

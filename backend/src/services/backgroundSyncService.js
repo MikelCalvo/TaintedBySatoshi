@@ -530,6 +530,7 @@ class BackgroundSyncService {
   async processBlock(block, db, scanDb) {
     const scanOperations = [];
     const blockTaintedOutpoints = new Map();
+    const blockOutputAddresses = new Map();
     const externalOutpoints = [];
     const seenExternalOutpoints = new Set();
     const blockTxids = new Set(
@@ -584,6 +585,11 @@ class BackgroundSyncService {
         address: this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey),
         value: vout.value,
       }));
+      for (const output of outputs) {
+        if (output.address) {
+          blockOutputAddresses.set(`${txid}:${output.index}`, output.address);
+        }
+      }
       const goesToSatoshi = outputs.some(
         (output) => output.address && SATOSHI_ADDRESS_SET.has(output.address)
       );
@@ -598,7 +604,9 @@ class BackgroundSyncService {
         if (vin.coinbase) continue;
         const outpoint = `${vin.txid}:${vin.vout}`;
         if (inputDegrees.get(outpoint) !== minDegree) continue;
-        if (vin.prevout?.scriptPubKey) {
+        if (blockOutputAddresses.has(outpoint)) {
+          sourceAddress = blockOutputAddresses.get(outpoint);
+        } else if (vin.prevout?.scriptPubKey) {
           sourceAddress = this.bitcoinRPC.getAddressFromScript(
             vin.prevout.scriptPubKey
           );
