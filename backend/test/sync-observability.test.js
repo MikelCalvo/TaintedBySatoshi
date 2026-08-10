@@ -60,6 +60,55 @@ test("committed blocks update durable checkpoint throughput metrics", () => {
   assert.equal(status.metrics.blocksPerSecond, 1);
 });
 
+test("block stage metrics expose timings, I/O volume and slow-block context", () => {
+  const sync = service();
+  sync.recordBlockMetrics({
+    height: 90,
+    totalMs: 1200,
+    inputLookupMs: 100,
+    mainPrefetchMs: 300,
+    parentLookupMs: 50,
+    processingMs: 500,
+    commitMs: 300,
+    externalOutpoints: 40,
+    mainPrefetchKeys: 80,
+    taintedTransactions: 5,
+    taintedOutputs: 12,
+    addressWrites: 9,
+    batchOperations: 27,
+  });
+  sync.recordBlockMetrics({
+    height: 91,
+    totalMs: 2400,
+    inputLookupMs: 200,
+    mainPrefetchMs: 700,
+    parentLookupMs: 150,
+    processingMs: 900,
+    commitMs: 600,
+    externalOutpoints: 50,
+    mainPrefetchKeys: 100,
+    taintedTransactions: 8,
+    taintedOutputs: 20,
+    addressWrites: 14,
+    batchOperations: 43,
+  });
+
+  const pipeline = sync.getStatus().metrics.pipeline;
+  assert.equal(pipeline.samples, 2);
+  assert.deepEqual(pipeline.averageMs, {
+    total: 1800,
+    inputLookup: 150,
+    mainPrefetch: 500,
+    parentLookup: 100,
+    processing: 700,
+    commit: 450,
+  });
+  assert.equal(pipeline.last.height, 91);
+  assert.equal(pipeline.last.addressWrites, 14);
+  assert.equal(pipeline.slowest.height, 91);
+  assert.equal(pipeline.slowest.totalMs, 2400);
+});
+
 test("stop waits for an active sync and closes the shared database", async () => {
   let finishSync;
   const active = new Promise((resolve) => {

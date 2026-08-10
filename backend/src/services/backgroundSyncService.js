@@ -36,6 +36,7 @@ class BackgroundSyncService {
     this.bitcoinRPC = dependencies.bitcoinRPC || bitcoinRPC;
     this.dbService = dependencies.dbService || dbService;
     this.logger = dependencies.logger || logger;
+    this.now = dependencies.now || Date.now;
     this.ensureInitializedOverride = dependencies.ensureInitialized || null;
     this.startSyncLoopOverride = dependencies.startSyncLoop || null;
     if (dependencies.satoshiAddresses) {
@@ -52,6 +53,9 @@ class BackgroundSyncService {
     this.currentBlock = null;
     this.activeSync = null;
     this.committedBlocks = [];
+    this.blockMetrics = [];
+    this.windowMetrics = null;
+    this.activeBlockMetrics = null;
     this.durableCheckpoint = { height: null, hash: null, updatedAt: null };
     this.syncInterval = null;
     this.lastProcessedBlock = null;
@@ -447,6 +451,7 @@ class BackgroundSyncService {
     let processedBlocks = 0;
 
     try {
+      const prefetchStartedAt = this.now();
       const prefetched = this.bitcoinRPC.getBlocksWindow
         ? await this.bitcoinRPC.getBlocksWindow(
             startBlock,
@@ -464,11 +469,31 @@ class BackgroundSyncService {
               }
             )
           );
+      this.windowMetrics = {
+        startBlock,
+        endBlock,
+        blocks: prefetched.length,
+        prefetchMs: this.now() - prefetchStartedAt,
+      };
 
       for (const { height, hash, block } of prefetched) {
         this.currentBlock = height;
         this.resetBatch();
+        const blockStartedAt = this.now();
+        this.activeBlockMetrics = {
+          inputLookupMs: 0,
+          mainPrefetchMs: 0,
+          parentLookupMs: 0,
+          parentPointReads: 0,
+          externalOutpoints: 0,
+          mainPrefetchKeys: 0,
+          taintedTransactions: 0,
+          taintedOutputs: 0,
+          addressWrites: 0,
+        };
+        const processingStartedAt = this.now();
         const scanOperations = (await this.processBlock(block, db, scanDb)) || [];
+        const processingMs = this.now() - processingStartedAt;
 
         for (const operation of scanOperations) {
           if (!this.safeBatchPut(operation.key, operation.value)) {
@@ -483,7 +508,28 @@ class BackgroundSyncService {
         })) {
           throw new Error("Main database batch is not writable");
         }
+        const batchOperations = this.batchCount;
+        const commitStartedAt = this.now();
         await this.flushBatch();
+        const commitMs = this.now() - commitStartedAt;
+
+        this.recordBlockMetrics({
+          height,
+          totalMs: this.now() - blockStartedAt,
+          inputLookupMs: this.activeBlockMetrics.inputLookupMs,
+          mainPrefetchMs: this.activeBlockMetrics.mainPrefetchMs,
+          parentLookupMs: this.activeBlockMetrics.parentLookupMs,
+          parentPointReads: this.activeBlockMetrics.parentPointReads,
+          processingMs,
+          commitMs,
+          externalOutpoints: this.activeBlockMetrics.externalOutpoints,
+          mainPrefetchKeys: this.activeBlockMetrics.mainPrefetchKeys,
+          taintedTransactions: this.activeBlockMetrics.taintedTransactions,
+          taintedOutputs: this.activeBlockMetrics.taintedOutputs,
+          addressWrites: this.activeBlockMetrics.addressWrites,
+          batchOperations,
+        });
+        this.activeBlockMetrics = null;
 
         processedBlocks++;
         this.syncStats.blocksProcessed++;
@@ -498,6 +544,7 @@ class BackgroundSyncService {
       this.batchIsValid = false;
       throw error;
     } finally {
+      this.activeBlockMetrics = null;
       this.mainDb = null;
     }
   }
@@ -511,6 +558,57 @@ class BackgroundSyncService {
     };
     this.committedBlocks.push({ height, timestamp });
     if (this.committedBlocks.length > 1000) this.committedBlocks.shift();
+  }
+
+  recordBlockMetrics(metrics) {
+    this.blockMetrics.push({ ...metrics });
+    if (this.blockMetrics.length > 100) this.blockMetrics.shift();
+  }
+
+  getPipelineMetrics() {
+    const emptyAverage = {
+      total: 0,
+      inputLookup: 0,
+      mainPrefetch: 0,
+      parentLookup: 0,
+      processing: 0,
+      commit: 0,
+    };
+    if (this.blockMetrics.length === 0) {
+      return {
+        samples: 0,
+        averageMs: emptyAverage,
+        last: null,
+        slowest: null,
+        window: this.windowMetrics,
+      };
+    }
+
+    const average = (key) =>
+      Math.round(
+        this.blockMetrics.reduce(
+          (sum, sample) => sum + (sample[key] || 0),
+          0
+        ) / this.blockMetrics.length
+      );
+    const slowest = this.blockMetrics.reduce((current, sample) =>
+      !current || sample.totalMs > current.totalMs ? sample : current
+    , null);
+
+    return {
+      samples: this.blockMetrics.length,
+      averageMs: {
+        total: average("totalMs"),
+        inputLookup: average("inputLookupMs"),
+        mainPrefetch: average("mainPrefetchMs"),
+        parentLookup: average("parentLookupMs"),
+        processing: average("processingMs"),
+        commit: average("commitMs"),
+      },
+      last: this.blockMetrics.at(-1),
+      slowest,
+      window: this.windowMetrics,
+    };
   }
 
   async verifyCheckpoint(progress) {
@@ -562,7 +660,12 @@ class BackgroundSyncService {
     const externalDegrees = new Map();
     if (externalOutpoints.length > 0) {
       const keys = externalOutpoints.map((outpoint) => `tainted_out:${outpoint}`);
+      const inputLookupStartedAt = this.now();
       const values = await scanDb.getMany(keys);
+      if (this.activeBlockMetrics) {
+        this.activeBlockMetrics.inputLookupMs += this.now() - inputLookupStartedAt;
+        this.activeBlockMetrics.externalOutpoints = externalOutpoints.length;
+      }
       for (let index = 0; index < externalOutpoints.length; index++) {
         const value = values[index];
         if (value !== undefined) {
@@ -615,14 +718,26 @@ class BackgroundSyncService {
             if (address) taintedAddresses.push(address);
           }
         }
+        const uniqueTaintedAddresses = [...new Set(taintedAddresses)];
+        const transactionIds = [...blockTxids];
+        const mainPrefetchStartedAt = this.now();
         mainRecords = await this.prefetchMainRecords(
           db,
-          [...new Set(taintedAddresses)],
-          [...blockTxids]
+          uniqueTaintedAddresses,
+          transactionIds
         );
+        if (this.activeBlockMetrics) {
+          this.activeBlockMetrics.mainPrefetchMs +=
+            this.now() - mainPrefetchStartedAt;
+          this.activeBlockMetrics.mainPrefetchKeys =
+            uniqueTaintedAddresses.length + transactionIds.length;
+        }
       }
 
       const currentDegree = minDegree + 1;
+      if (this.activeBlockMetrics) {
+        this.activeBlockMetrics.taintedTransactions++;
+      }
       const formattedTx = this.bitcoinRPC.formatTransaction(tx);
       let sourceAddress = null;
 
@@ -652,6 +767,9 @@ class BackgroundSyncService {
       // safe because LevelDB puts are idempotent and address writes retain the
       // existing shortest path.
       for (const output of outputs) {
+        if (this.activeBlockMetrics) {
+          this.activeBlockMetrics.taintedOutputs++;
+        }
         const outpoint = `${txid}:${output.index}`;
         scanOperations.push({
           key: `tainted_out:${outpoint}`,
@@ -721,7 +839,13 @@ class BackgroundSyncService {
       }
       if (!parentTinting) {
         try {
+          const parentLookupStartedAt = this.now();
           parentTinting = await db.get(`tainted:${sourceAddress}`);
+          if (this.activeBlockMetrics) {
+            this.activeBlockMetrics.parentLookupMs +=
+              this.now() - parentLookupStartedAt;
+            this.activeBlockMetrics.parentPointReads++;
+          }
           if (this.parentTaintingCache.size > 10000) {
             const firstKey = this.parentTaintingCache.keys().next().value;
             this.parentTaintingCache.delete(firstKey);
@@ -781,6 +905,9 @@ class BackgroundSyncService {
 
     if (!this.safeBatchPut(addressKey, taintData)) {
       throw new Error("Main database batch is not writable");
+    }
+    if (this.activeBlockMetrics) {
+      this.activeBlockMetrics.addressWrites++;
     }
     if (mainRecords) {
       mainRecords.set(addressKey, taintData);
@@ -863,6 +990,7 @@ class BackgroundSyncService {
                 this.committedBlocks[0].timestamp) /
                 1000)
             : 0,
+        pipeline: this.getPipelineMetrics(),
       },
       stats: this.syncStats,
       config: {

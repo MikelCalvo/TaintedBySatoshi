@@ -394,6 +394,73 @@ test("main record prefetch is skipped for untainted blocks", async () => {
   assert.equal(mainGetManyCalls, 0);
 });
 
+test("block processing records NAS lookup stages and parent point reads", async () => {
+  let now = 0;
+  const mainDb = {
+    async getMany(keys) {
+      now += 11;
+      return keys.map(() => undefined);
+    },
+    async get(key) {
+      assert.equal(key, "tainted:parent-address");
+      now += 13;
+      return { originalSatoshiAddress: "seed-address", degree: 2 };
+    },
+    batch() {
+      return { put() {}, async write() {} };
+    },
+  };
+  const scanDb = {
+    async getMany() {
+      now += 7;
+      return [{ degree: 2, address: "parent-address" }];
+    },
+  };
+  const service = serviceForProcessing();
+  service.now = () => now;
+  service.mainDb = mainDb;
+  service.resetBatch();
+  service.activeBlockMetrics = {
+    inputLookupMs: 0,
+    mainPrefetchMs: 0,
+    parentLookupMs: 0,
+    parentPointReads: 0,
+    externalOutpoints: 0,
+    mainPrefetchKeys: 0,
+    taintedTransactions: 0,
+    taintedOutputs: 0,
+    addressWrites: 0,
+  };
+
+  await service.processBlock(
+    {
+      tx: [
+        {
+          txid: "child",
+          vin: [{ txid: "parent", vout: 0 }],
+          vout: [
+            { value: 1, scriptPubKey: { address: "child-address" } },
+          ],
+        },
+      ],
+    },
+    mainDb,
+    scanDb
+  );
+
+  assert.deepEqual(service.activeBlockMetrics, {
+    inputLookupMs: 7,
+    mainPrefetchMs: 11,
+    parentLookupMs: 13,
+    parentPointReads: 1,
+    externalOutpoints: 1,
+    mainPrefetchKeys: 2,
+    taintedTransactions: 1,
+    taintedOutputs: 1,
+    addressWrites: 1,
+  });
+});
+
 test("database I/O errors are not treated as untainted misses", async () => {
   const scanDb = {
     async getMany() {

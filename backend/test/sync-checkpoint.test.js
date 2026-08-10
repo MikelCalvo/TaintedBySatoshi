@@ -152,6 +152,70 @@ test("main mutations, scan state and checkpoint share one database commit", asyn
   );
 });
 
+test("sync records stage timings and write amplification per block", async () => {
+  let now = 0;
+  const mainDb = createBatchDb();
+  const service = new BackgroundSyncService({
+    bitcoinRPC: {
+      async getBlocksWindow() {
+        now += 10;
+        return [
+          { height: 30, hash: "hash-30", block: { hash: "hash-30", tx: [] } },
+        ];
+      },
+    },
+    dbService: {
+      async init() {
+        return mainDb;
+      },
+    },
+    logger: { info() {}, error() {} },
+    satoshiAddresses: ["seed"],
+    now: () => now,
+  });
+  service.processBlock = async () => {
+    now += 20;
+    service.activeBlockMetrics.inputLookupMs = 4;
+    service.activeBlockMetrics.mainPrefetchMs = 6;
+    service.activeBlockMetrics.externalOutpoints = 8;
+    service.activeBlockMetrics.mainPrefetchKeys = 12;
+    service.activeBlockMetrics.taintedTransactions = 2;
+    service.activeBlockMetrics.taintedOutputs = 3;
+    service.activeBlockMetrics.addressWrites = 2;
+    return [{ key: "tainted_out:test:0", value: 1 }];
+  };
+  service.flushBatch = async () => {
+    now += 30;
+    service.batchIsValid = false;
+  };
+
+  await service.syncNewBlocks(30, 30, mainDb);
+
+  const last = service.getStatus().metrics.pipeline.last;
+  assert.deepEqual(last, {
+    height: 30,
+    totalMs: 50,
+    inputLookupMs: 4,
+    mainPrefetchMs: 6,
+    parentLookupMs: 0,
+    parentPointReads: 0,
+    processingMs: 20,
+    commitMs: 30,
+    externalOutpoints: 8,
+    mainPrefetchKeys: 12,
+    taintedTransactions: 2,
+    taintedOutputs: 3,
+    addressWrites: 2,
+    batchOperations: 2,
+  });
+  assert.deepEqual(service.getStatus().metrics.pipeline.window, {
+    startBlock: 30,
+    endBlock: 30,
+    blocks: 1,
+    prefetchMs: 10,
+  });
+});
+
 test("checkpoint persists block identity and schema version", async () => {
   const mainDb = createBatchDb();
   const scanDb = createScanDb();
