@@ -4,13 +4,16 @@ const bitcoinRPC = require("./bitcoinRPC");
 const logger = require("../utils/logger");
 const path = require("path");
 const fs = require("fs");
+const { normalizeTaintedDegree } = require("./syncUtils");
 
 // Load Satoshi addresses
 let SATOSHI_ADDRESSES = [];
+let SATOSHI_ADDRESS_SET = new Set();
 function loadSatoshiAddresses() {
   try {
     const satoshiData = require("../../data/satoshiAddresses");
     SATOSHI_ADDRESSES = satoshiData.SATOSHI_ADDRESSES || [];
+    SATOSHI_ADDRESS_SET = new Set(SATOSHI_ADDRESSES);
     return SATOSHI_ADDRESSES.length > 0;
   } catch (err) {
     return false;
@@ -18,7 +21,16 @@ function loadSatoshiAddresses() {
 }
 
 class BackgroundSyncService {
-  constructor() {
+  constructor(dependencies = {}) {
+    this.bitcoinRPC = dependencies.bitcoinRPC || bitcoinRPC;
+    this.dbService = dependencies.dbService || dbService;
+    this.logger = dependencies.logger || logger;
+    this.ensureInitializedOverride = dependencies.ensureInitialized || null;
+    this.startSyncLoopOverride = dependencies.startSyncLoop || null;
+    if (dependencies.satoshiAddresses) {
+      SATOSHI_ADDRESSES = dependencies.satoshiAddresses;
+      SATOSHI_ADDRESS_SET = new Set(SATOSHI_ADDRESSES);
+    }
     this.isRunning = false;
     this.isSyncing = false;
     this.syncInterval = null;
@@ -50,65 +62,59 @@ class BackgroundSyncService {
 
     // Database ready flag
     this.dbReady = false;
+    this.starting = null;
   }
 
   async start() {
+    if (this.starting) {
+      return this.starting;
+    }
     if (this.isRunning) {
-      logger.info("Background sync service is already running");
+      this.logger.info("Background sync service is already running");
       return;
     }
 
     if (!this.config.enabled) {
-      logger.info("Background sync is disabled (SYNC_ENABLED=false)");
+      this.logger.info("Background sync is disabled (SYNC_ENABLED=false)");
       return;
     }
 
-    this.isRunning = true;
-    logger.info("Background sync service initializing...");
+    this.starting = (async () => {
+      this.isRunning = true;
+      this.logger.info("Background sync service initializing...");
 
-    // Initialize Bitcoin RPC connection
-    try {
-      await bitcoinRPC.initialize();
-    } catch (error) {
-      logger.error("Failed to initialize Bitcoin RPC:", error.message);
-      this.isRunning = false;
-      return;
-    }
-
-    // Run initialization steps with timeout
-    try {
-      // Timeout after 10 seconds to not block startup
-      await Promise.race([
-        this.ensureInitialized(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Initialization timeout - continuing in background")), 10000)
-        )
-      ]);
-    } catch (error) {
-      if (error.message.includes("timeout")) {
-        logger.info("⚠️  Initialization taking longer than expected, continuing in background...");
-        // Continue initialization in background
-        setImmediate(() => {
-          this.ensureInitialized().catch(err => {
-            logger.error("Background initialization failed:", err.message);
-          });
-        });
-      } else {
-        logger.error("Failed to initialize database:", error.message);
+      try {
+        await this.bitcoinRPC.initialize();
+        const initialize = this.ensureInitializedOverride
+          ? this.ensureInitializedOverride
+          : () => this.ensureInitialized();
+        await initialize();
+        this.dbReady = true;
+      } catch (error) {
+        this.logger.error("Failed to initialize background sync:", error.message);
         this.isRunning = false;
-        return;
+        this.dbReady = false;
+        throw error;
       }
+
+      this.logger.info("Background sync service started");
+      if (this.startSyncLoopOverride) {
+        this.startSyncLoopOverride();
+      } else {
+        this.startSyncLoop();
+      }
+    })();
+
+    try {
+      await this.starting;
+    } finally {
+      this.starting = null;
     }
-
-    logger.info(`Background sync service started`);
-
-    // Start continuous sync loop
-    this.startSyncLoop();
   }
 
   async initializeCoinbaseOutputs() {
     // Use shared database instance to avoid locking conflicts
-    const scanDb = await bitcoinRPC.openDatabase();
+    const scanDb = await this.bitcoinRPC.openDatabase();
 
     try {
       logger.info("🔍 Initializing Satoshi coinbase outputs as tainted...");
@@ -136,14 +142,14 @@ class BackgroundSyncService {
         }
 
         try {
-          const hash = await bitcoinRPC.call("getblockhash", [height]);
-          const block = await bitcoinRPC.call("getblock", [hash, 2]);
+          const hash = await this.bitcoinRPC.call("getblockhash", [height]);
+          const block = await this.bitcoinRPC.call("getblock", [hash, 2]);
           const coinbaseTx = block.tx[0];
 
           // Mark each coinbase output as tainted
           for (let voutIndex = 0; voutIndex < coinbaseTx.vout.length; voutIndex++) {
             const vout = coinbaseTx.vout[voutIndex];
-            const address = bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
+            const address = this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
             const outpoint = `${coinbaseTx.txid}:${voutIndex}`;
 
             coinbaseBatch.put(`tainted_out:${outpoint}`, {
@@ -229,27 +235,11 @@ class BackgroundSyncService {
         fs.mkdirSync(DB_PATH, { recursive: true });
       }
 
-      // Step 1: Check and extract Patoshi addresses if needed
+      // Step 1: Extract Patoshi addresses before scanning if needed
       if (!fs.existsSync(satoshiAddressesPath)) {
-        logger.info("\n⚠️  Patoshi addresses not found.");
-        logger.info("📥 This will be extracted in background. Server will continue serving requests.\n");
-
-        // Extract addresses in background to not block startup
-        setImmediate(async () => {
-          try {
-            const { extractPatoshiAddresses } = require("../scripts/extractPatoshiAddresses");
-            await extractPatoshiAddresses();
-            logger.info("✓ Patoshi addresses extracted successfully");
-            // Trigger a reload of the sync service
-            loadSatoshiAddresses();
-          } catch (err) {
-            logger.error("Failed to extract Patoshi addresses:", err.message);
-          }
-        });
-
-        // For now, use empty array and let background extraction finish
-        logger.info("[Init] Continuing without addresses for now...");
-        return;
+        logger.info("[Init] Patoshi addresses not found, extracting before sync...");
+        const { extractPatoshiAddresses } = require("../scripts/extractPatoshiAddresses");
+        await extractPatoshiAddresses();
       }
 
       logger.info("[Init] Step 2: Loading Satoshi addresses...");
@@ -265,76 +255,52 @@ class BackgroundSyncService {
 
       logger.info("[Init] Step 3: Initializing main database...");
       // Step 2: Initialize main database and Satoshi addresses
-      const db = await dbService.init();
+      const db = await this.dbService.init();
       this.dbReady = true;
       logger.info("[Init] Main database ready");
 
-      logger.info("[Init] Step 4: Scheduling address initialization check...");
-      // Check and initialize addresses in background (don't block)
-      setImmediate(async () => {
-        try {
-          const db = await dbService.init();
-          // Quick check if addresses need initialization
-          let needsInit = false;
-          try {
-            const testAddress = SATOSHI_ADDRESSES[0];
-            await db.get(`tainted:${testAddress}`);
-            logger.info("[Init] Satoshi addresses already initialized");
-          } catch (err) {
-            needsInit = true;
-          }
+      logger.info("[Init] Step 4: Checking Satoshi address seeds...");
+      let needsAddressInit = false;
+      try {
+        await db.get(`tainted:${SATOSHI_ADDRESSES[0]}`);
+        logger.info("[Init] Satoshi addresses already initialized");
+      } catch (err) {
+        if (err.code !== "LEVEL_NOT_FOUND") throw err;
+        needsAddressInit = true;
+      }
 
-          if (needsInit) {
-            logger.info("[Init] Initializing Satoshi addresses...");
-            const taintedBatch = db.batch();
-            for (const address of SATOSHI_ADDRESSES) {
-              taintedBatch.put(`tainted:${address}`, {
-                txHash: null,
-                originalSatoshiAddress: address,
-                amount: 0,
-                degree: 0,
-                path: [],
-                lastUpdated: Date.now(),
-              });
-            }
-            await taintedBatch.write();
-            logger.info(`✓ Initialized ${SATOSHI_ADDRESSES.length.toLocaleString()} Satoshi addresses`);
-          }
-        } catch (err) {
-          logger.error("Failed to initialize Satoshi addresses:", err.message);
+      if (needsAddressInit) {
+        logger.info("[Init] Initializing Satoshi addresses...");
+        const taintedBatch = db.batch();
+        for (const address of SATOSHI_ADDRESSES) {
+          taintedBatch.put(`tainted:${address}`, {
+            txHash: null,
+            originalSatoshiAddress: address,
+            amount: 0,
+            degree: 0,
+            path: [],
+            lastUpdated: Date.now(),
+          });
         }
-      });
+        await taintedBatch.write();
+        logger.info(`✓ Initialized ${SATOSHI_ADDRESSES.length.toLocaleString()} Satoshi addresses`);
+      }
 
-      logger.info("[Init] Step 5: Scheduling coinbase initialization check...");
-      // Check coinbase initialization completely in background
-      setImmediate(async () => {
-        try {
-          // Use shared database instance to avoid locking conflicts
-          const scanDb = await bitcoinRPC.openDatabase();
+      logger.info("[Init] Step 5: Checking coinbase seeds...");
+      const scanDb = await this.bitcoinRPC.openDatabase();
+      let coinbaseReady = false;
+      try {
+        await scanDb.get("satoshi_coinbase_initialized");
+        coinbaseReady = true;
+        logger.info("[Init] Coinbase outputs already initialized");
+      } catch (err) {
+        if (err.code !== "LEVEL_NOT_FOUND") throw err;
+      }
 
-          let needsCoinbaseInit = false;
-          try {
-            await scanDb.get("satoshi_coinbase_initialized");
-            logger.info("[Init] Coinbase outputs already initialized");
-          } catch (err) {
-            needsCoinbaseInit = true;
-            logger.info("[Init] Coinbase outputs need initialization");
-          }
-
-          // Don't close scanDb - it's a shared instance
-
-          if (needsCoinbaseInit) {
-            logger.info("🔍 Initializing Satoshi coinbase outputs in background...");
-            logger.info(`   This is a one-time process that may take 25-30 minutes.`);
-            logger.info(`   The server will continue serving requests.\n`);
-
-            // Initialize coinbase outputs
-            await this.initializeCoinbaseOutputs();
-          }
-        } catch (err) {
-          logger.error("Error checking coinbase initialization:", err.message);
-        }
-      });
+      if (!coinbaseReady) {
+        logger.info("[Init] Initializing Satoshi coinbase outputs before sync...");
+        await this.initializeCoinbaseOutputs();
+      }
 
       logger.info("[Init] Initialization checks completed");
     } catch (error) {
@@ -379,16 +345,16 @@ class BackgroundSyncService {
       this.isSyncing = true;
 
       // Get current blockchain height
-      const blockchainInfo = await bitcoinRPC.getBlockchainInfo();
+      const blockchainInfo = await this.bitcoinRPC.getBlockchainInfo();
       this.currentHeight = blockchainInfo.blocks;
 
       // Get last processed block from scan_progress DB
-      const scanDb = await bitcoinRPC.openDatabase();
+      const scanDb = await this.bitcoinRPC.openDatabase();
       let lastProcessedBlock = -1;
 
       try {
         const progress = await scanDb.get("scan_progress");
-        lastProcessedBlock = progress.lastBlock || -1;
+        lastProcessedBlock = progress.lastBlock ?? -1;
       } catch (err) {
         // No progress saved, start from beginning
         lastProcessedBlock = -1;
@@ -421,7 +387,7 @@ class BackgroundSyncService {
   }
 
   async syncNewBlocks(startBlock, endBlock, scanDb) {
-    const db = await dbService.init();
+    const db = await this.dbService.init();
     this.mainDb = db;
     let processedBlocks = 0;
 
@@ -432,10 +398,10 @@ class BackgroundSyncService {
       for (let height = startBlock; height <= endBlock; height++) {
         try {
           // Get block hash
-          const hash = await bitcoinRPC.call("getblockhash", [height]);
+          const hash = await this.bitcoinRPC.call("getblockhash", [height]);
 
           // Get full block data
-          const block = await bitcoinRPC.call("getblock", [hash, 2]);
+          const block = await this.bitcoinRPC.call("getblock", [hash, 2]);
 
           // Process the block
           await this.processBlock(block, db, scanDb);
@@ -510,7 +476,9 @@ class BackgroundSyncService {
         } else {
           // Check DB for tainted outpoint
           try {
-            const degree = await scanDb.get(`tainted_out:${outpoint}`);
+            const degree = normalizeTaintedDegree(
+              await scanDb.get(`tainted_out:${outpoint}`)
+            );
             if (degree !== undefined && degree !== null) {
               isTaintSpreading = true;
               if (degree < minDegree) {
@@ -527,13 +495,13 @@ class BackgroundSyncService {
       const outputs = tx.vout
         .map((vout, index) => ({
           index,
-          address: bitcoinRPC.getAddressFromScript(vout.scriptPubKey),
+          address: this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey),
           value: vout.value,
         }))
         .filter((o) => o.address);
 
       const goesToSatoshi = outputs.some((o) =>
-        SATOSHI_ADDRESSES.includes(o.address)
+        SATOSHI_ADDRESS_SET.has(o.address)
       );
       if (goesToSatoshi) {
         isTaintSpreading = true;
@@ -542,7 +510,7 @@ class BackgroundSyncService {
 
       if (isTaintSpreading) {
         const currentDegree = minDegree + 1;
-        const formattedTx = bitcoinRPC.formatTransaction(tx);
+        const formattedTx = this.bitcoinRPC.formatTransaction(tx);
 
         // Find source address from tainted inputs
         let sourceAddress = null;
@@ -556,7 +524,9 @@ class BackgroundSyncService {
             inputDegree = blockTaintedOutpoints.get(outpoint);
           } else {
             try {
-              inputDegree = await scanDb.get(`tainted_out:${outpoint}`);
+              inputDegree = normalizeTaintedDegree(
+                await scanDb.get(`tainted_out:${outpoint}`)
+              );
             } catch (e) {
               // Not tainted
             }
@@ -566,7 +536,7 @@ class BackgroundSyncService {
           if (inputDegree !== null && inputDegree === minDegree) {
             // Try to get address from prevout
             if (vin.prevout && vin.prevout.scriptPubKey) {
-              sourceAddress = bitcoinRPC.getAddressFromScript(vin.prevout.scriptPubKey);
+              sourceAddress = this.bitcoinRPC.getAddressFromScript(vin.prevout.scriptPubKey);
             } else if (formattedTx.inputs && formattedTx.inputs.length > 0) {
               // Fallback to formatted transaction inputs
               const input = formattedTx.inputs.find(
@@ -590,7 +560,9 @@ class BackgroundSyncService {
 
           if (!alreadyTainted) {
             try {
-              const degree = await scanDb.get(`tainted_out:${outpoint}`);
+              const degree = normalizeTaintedDegree(
+                await scanDb.get(`tainted_out:${outpoint}`)
+              );
               if (degree !== undefined && degree !== null) {
                 alreadyTainted = true;
               }
@@ -600,7 +572,7 @@ class BackgroundSyncService {
           }
 
           if (!alreadyTainted) {
-            const address = bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
+            const address = this.bitcoinRPC.getAddressFromScript(vout.scriptPubKey);
 
             // Store tainted outpoint in batch
             taintedOutBatch.put(`tainted_out:${outpoint}`, currentDegree);
@@ -683,7 +655,7 @@ class BackgroundSyncService {
             amount: amount,
           },
         ];
-      } else if (SATOSHI_ADDRESSES.includes(address)) {
+      } else if (SATOSHI_ADDRESS_SET.has(address)) {
         originalSatoshiAddress = address;
       }
 
@@ -799,3 +771,4 @@ class BackgroundSyncService {
 
 // Export singleton instance
 module.exports = new BackgroundSyncService();
+module.exports.BackgroundSyncService = BackgroundSyncService;

@@ -1,45 +1,68 @@
 const { Level } = require("level");
 const path = require("path");
-const logger = require("../utils/logger");
+const defaultLogger = require("../utils/logger");
 
 class DatabaseService {
-  constructor() {
+  constructor(options = {}) {
     this.db = null;
-    // Use environment variable for DB path or fall back to default
-    // Note: DB_PATH should point directly to the database directory (e.g., ./data)
-    // The updateSatoshiData.js script stores data directly in DB_PATH
-    this.dbPath = process.env.DB_PATH || path.join(__dirname, "../../data");
+    this.opening = null;
+    this.dbPath =
+      options.dbPath ||
+      process.env.DB_PATH ||
+      path.join(__dirname, "../../data");
+    this.createDatabase =
+      options.createDatabase ||
+      ((dbPath) =>
+        new Level(dbPath, {
+          valueEncoding: "json",
+          createIfMissing: true,
+        }));
+    this.ensureDirectory =
+      options.ensureDirectory ||
+      ((dbPath) => {
+        const fs = require("fs");
+        if (!fs.existsSync(dbPath)) {
+          fs.mkdirSync(dbPath, { recursive: true });
+        }
+      });
+    this.logger = options.logger || defaultLogger;
   }
 
   async init() {
-    if (!this.db) {
-      // Ensure the directory exists
-      const fs = require("fs");
-      if (!fs.existsSync(this.dbPath)) {
-        fs.mkdirSync(this.dbPath, { recursive: true });
-      }
-
-      this.db = new Level(this.dbPath, {
-        valueEncoding: "json",
-        createIfMissing: true,
-      });
-
-      // Modern LevelDB opens automatically, just ensure it's open
-      try {
-        await this.db.open();
-      } catch (err) {
-        // If already open, ignore the error
-        if (err.code !== 'LEVEL_DATABASE_NOT_CLOSED') {
-          throw err;
-        }
-      }
-
-      logger.info(`Database initialized at: ${this.dbPath}`);
+    if (this.db?.status === "open") {
+      return this.db;
     }
-    return this.db;
+
+    if (this.opening) {
+      return this.opening;
+    }
+
+    this.opening = (async () => {
+      try {
+        this.ensureDirectory(this.dbPath);
+        if (!this.db || this.db.status === "closed") {
+          this.db = this.createDatabase(this.dbPath);
+        }
+        if (this.db.status !== "open") {
+          await this.db.open();
+        }
+        this.logger.info(`Database initialized at: ${this.dbPath}`);
+        return this.db;
+      } catch (error) {
+        this.db = null;
+        throw error;
+      } finally {
+        this.opening = null;
+      }
+    })();
+
+    return this.opening;
   }
 
   async close() {
+    if (this.opening) {
+      await this.opening;
+    }
     if (this.db) {
       await this.db.close();
       this.db = null;
@@ -60,8 +83,7 @@ class DatabaseService {
 
   async getTaintedInfo(address) {
     try {
-      const data = await this.db.get(`tainted:${address}`);
-      return data;
+      return await this.db.get(`tainted:${address}`);
     } catch (err) {
       if (err.code === "LEVEL_NOT_FOUND") {
         return null;
@@ -76,8 +98,7 @@ class DatabaseService {
 
   async getTransaction(txHash) {
     try {
-      const data = await this.db.get(`tx:${txHash}`);
-      return data;
+      return await this.db.get(`tx:${txHash}`);
     } catch (err) {
       if (err.code === "LEVEL_NOT_FOUND") {
         return null;
@@ -103,8 +124,7 @@ class DatabaseService {
 
   async getDatabaseStatus() {
     try {
-      const status = await this.db.get("db:status");
-      return status;
+      return await this.db.get("db:status");
     } catch (err) {
       return {
         lastUpdate: null,
@@ -114,5 +134,5 @@ class DatabaseService {
   }
 }
 
-// Export singleton instance
 module.exports = new DatabaseService();
+module.exports.DatabaseService = DatabaseService;
