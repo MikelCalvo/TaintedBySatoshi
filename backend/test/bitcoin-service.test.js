@@ -13,27 +13,10 @@ function notFound() {
   return error;
 }
 
-test("connection paths remain compatible with legacy full-path records", async () => {
-  const db = { async get() { throw notFound(); } };
-  const path = [{ from: "seed", to: "legacy", txHash: "legacy-tx", amount: 1 }];
-
-  assert.deepEqual(await buildConnectionPath(db, "legacy", { path }), path);
-});
-
-test("connection paths are reconstructed from compact parent edges", async () => {
+test("connection paths are reconstructed from compact parent hops", async () => {
   const records = new Map([
-    ["tainted:parent", {
-      originalSatoshiAddress: "seed",
-      degree: 1,
-      parentAddress: "seed",
-      edge: { from: "seed", to: "parent", txHash: "parent-tx", amount: 2 },
-    }],
-    ["tainted:seed", {
-      originalSatoshiAddress: "seed",
-      degree: 0,
-      parentAddress: null,
-      edge: null,
-    }],
+    ["a:parent", { d: 1, p: "seed", t: "parent-tx", n: 2, o: "seed" }],
+    ["a:seed", { d: 0, p: null, t: null, n: 0, o: "seed" }],
   ]);
   const db = {
     async get(key) {
@@ -41,144 +24,29 @@ test("connection paths are reconstructed from compact parent edges", async () =>
       throw notFound();
     },
   };
-  const child = {
-    originalSatoshiAddress: "seed",
-    degree: 2,
-    parentAddress: "parent",
-    edge: { from: "parent", to: "child", txHash: "child-tx", amount: 1 },
-  };
+  const child = { d: 2, p: "parent", t: "child-tx", n: 1, o: "seed" };
 
   assert.deepEqual(await buildConnectionPath(db, "child", child), [
-    { from: "seed", to: "parent", txHash: "parent-tx", amount: 2 },
-    { from: "parent", to: "child", txHash: "child-tx", amount: 1 },
+    { from: "seed", to: "parent", txHash: "parent-tx", amount: 2, hops: 1 },
+    { from: "parent", to: "child", txHash: "child-tx", amount: 1, hops: 2 },
   ]);
 });
 
-test("compact children preserve a legacy parent's full path", async () => {
-  const db = {
-    async get(key) {
-      assert.equal(key, "tainted:legacy-parent");
-      return {
-        degree: 2,
-        path: [
-          { from: "seed", to: "middle", txHash: "seed-tx", amount: 2 },
-          {
-            from: "middle",
-            to: "legacy-parent",
-            txHash: "legacy-tx",
-            amount: 1,
-          },
-        ],
-      };
-    },
-  };
-  const child = {
-    degree: 3,
-    parentAddress: "legacy-parent",
-    edge: {
-      from: "legacy-parent",
-      to: "child",
-      txHash: "child-tx",
-      amount: 0.5,
-    },
-  };
-
-  assert.deepEqual(await buildConnectionPath(db, "child", child), [
-    { from: "seed", to: "middle", txHash: "seed-tx", amount: 2 },
-    {
-      from: "middle",
-      to: "legacy-parent",
-      txHash: "legacy-tx",
-      amount: 1,
-    },
-    {
-      from: "legacy-parent",
-      to: "child",
-      txHash: "child-tx",
-      amount: 0.5,
-    },
-  ]);
-});
-
-test("legacy parents preserve full transaction summaries for compact children", async () => {
+test("address checks report hops without reading transaction caches", async () => {
   const originalInit = dbService.init;
   const db = {
     async get(key) {
-      if (key === "tainted:child") {
-        return {
-          degree: 3,
-          parentAddress: "legacy-parent",
-          edge: {
-            from: "legacy-parent",
-            to: "child",
-            txHash: "child-tx",
-            amount: 0.5,
-          },
-        };
+      if (key === "a:child") {
+        return { d: 2, p: "parent", t: "child-tx", n: 1, o: "seed" };
       }
-      if (key === "tainted:legacy-parent") {
-        return {
-          degree: 2,
-          path: [
-            {
-              from: "seed",
-              to: "legacy-parent",
-              txHash: "legacy-tx",
-              amount: 1,
-            },
-          ],
-        };
+      if (key === "a:parent") {
+        return { d: 1, p: "seed", t: "parent-tx", n: 2, o: "seed" };
       }
-      throw notFound();
-    },
-  };
-  dbService.init = async () => db;
-
-  try {
-    const result = await checkAddressConnection("child");
-    assert.deepEqual(result.connectionPath, [
-      {
-        from: "seed",
-        to: "legacy-parent",
-        txHash: "legacy-tx",
-        amount: 1,
-      },
-      {
-        from: "legacy-parent",
-        to: "child",
-        txHash: "child-tx",
-        amount: 0.5,
-      },
-    ]);
-    assert.deepEqual(result.transactions, [
-      { hash: "legacy-tx", amount: 1 },
-      { hash: "child-tx", amount: 0.5 },
-    ]);
-  } finally {
-    dbService.init = originalInit;
-  }
-});
-
-test("address checks derive transaction summaries from immutable path edges", async () => {
-  const originalInit = dbService.init;
-  const db = {
-    async get(key) {
-      if (key === "tainted:child") {
-        return {
-          degree: 2,
-          parentAddress: "parent",
-          edge: { from: "parent", to: "child", txHash: "child-tx", amount: 1 },
-        };
+      if (key === "a:seed") {
+        return { d: 0, p: null, t: null, n: 0, o: "seed" };
       }
-      if (key === "tainted:parent") {
-        return {
-          degree: 1,
-          parentAddress: "seed",
-          edge: { from: "seed", to: "parent", txHash: "parent-tx", amount: 2 },
-        };
-      }
-      if (key.startsWith("tx:")) {
-        throw new Error("checks must not read cached transaction payloads");
+      if (key.startsWith("tx:") || key.startsWith("tainted:")) {
+        throw new Error("checks must not read historical caches");
       }
       throw notFound();
     },
@@ -190,14 +58,88 @@ test("address checks derive transaction summaries from immutable path edges", as
       isConnected: true,
       isSatoshiAddress: false,
       degree: 2,
+      hops: 2,
+      origin: "seed",
       connectionPath: [
-        { from: "seed", to: "parent", txHash: "parent-tx", amount: 2 },
-        { from: "parent", to: "child", txHash: "child-tx", amount: 1 },
+        { from: "seed", to: "parent", txHash: "parent-tx", amount: 2, hops: 1 },
+        { from: "parent", to: "child", txHash: "child-tx", amount: 1, hops: 2 },
       ],
       transactions: [
         { hash: "parent-tx", amount: 2 },
         { hash: "child-tx", amount: 1 },
       ],
+    });
+  } finally {
+    dbService.init = originalInit;
+  }
+});
+
+test("wallet listing pages compact hop records without historical caches", async () => {
+  const originalInit = dbService.init;
+  const records = [
+    ["a:alice", { d: 1, p: "seed", t: "tx-a", n: 1, o: "seed" }],
+    ["a:bob", { d: 2, p: "alice", t: "tx-b", n: 2, o: "seed" }],
+    ["u:live:0", { d: 2, a: "bob", p: "alice", t: "tx-b", n: 2, o: "seed" }],
+  ];
+  dbService.init = async () => ({
+    iterator() {
+      return (async function* () {
+        for (const entry of records) yield entry;
+      })();
+    },
+  });
+
+  try {
+    const { listTaintedWallets } = require("../src/services/bitcoinService");
+    assert.deepEqual(await listTaintedWallets({ limit: 10 }), {
+      wallets: [
+        {
+          address: "alice",
+          isConnected: true,
+          isSatoshiAddress: false,
+          degree: 1,
+          hops: 1,
+          origin: "seed",
+          parent: "seed",
+          txHash: "tx-a",
+          amount: 1,
+        },
+        {
+          address: "bob",
+          isConnected: true,
+          isSatoshiAddress: false,
+          degree: 2,
+          hops: 2,
+          origin: "seed",
+          parent: "alice",
+          txHash: "tx-b",
+          amount: 2,
+        },
+      ],
+      nextCursor: null,
+    });
+  } finally {
+    dbService.init = originalInit;
+  }
+});
+
+test("unknown addresses are reported as unconnected", async () => {
+  const originalInit = dbService.init;
+  dbService.init = async () => ({
+    async get() {
+      throw notFound();
+    },
+  });
+
+  try {
+    assert.deepEqual(await checkAddressConnection("1UnknownAddressxxxxxxxxxxxxxx"), {
+      isConnected: false,
+      isSatoshiAddress: false,
+      degree: 0,
+      hops: 0,
+      origin: null,
+      connectionPath: [],
+      transactions: [],
     });
   } finally {
     dbService.init = originalInit;

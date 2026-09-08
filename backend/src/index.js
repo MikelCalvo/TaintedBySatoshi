@@ -3,7 +3,10 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
-const { checkAddressConnection } = require("./services/bitcoinService");
+const {
+  checkAddressConnection,
+  listTaintedWallets,
+} = require("./services/bitcoinService");
 const backgroundSyncService = require("./services/backgroundSyncService");
 const analyticsService = require("./services/analyticsService");
 const { validateAndSanitizeAddress } = require("./utils/validation");
@@ -297,6 +300,23 @@ app.get("/api/check/:address", addressCheckLimiter, async (req, res) => {
 
     res.status(500).json({
       error: "Failed to check address connection",
+      message:
+        "The server encountered an error while processing your request. Please try again.",
+    });
+  }
+});
+
+app.get("/api/wallets", async (req, res) => {
+  try {
+    const limit = Number.parseInt(req.query.limit, 10);
+    const cursor =
+      typeof req.query.cursor === "string" ? req.query.cursor : null;
+    const result = await listTaintedWallets({ limit, cursor });
+    res.json(result);
+  } catch (error) {
+    logger.error("Error listing wallets", { error: error.message });
+    res.status(500).json({
+      error: "Failed to list tainted wallets",
       message:
         "The server encountered an error while processing your request. Please try again.",
     });
