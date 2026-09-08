@@ -107,6 +107,8 @@ class BackgroundSyncService {
     this.starting = null;
     this.liveCache = new Map();
     this.addressCache = new Map();
+    this.windowLiveOutpoints = null;
+    this.windowAddressRecords = null;
   }
 
   rememberBounded(cache, limit, key, value) {
@@ -554,6 +556,8 @@ class BackgroundSyncService {
 
       const windowPuts = new Map();
       const windowDels = new Set();
+      this.windowLiveOutpoints = new Map();
+      this.windowAddressRecords = new Map();
       const blockTimings = [];
       let newWallets = 0;
       let lastHeight = null;
@@ -691,6 +695,8 @@ class BackgroundSyncService {
       throw error;
     } finally {
       this.activeBlockMetrics = null;
+      this.windowLiveOutpoints = null;
+      this.windowAddressRecords = null;
       this.mainDb = null;
     }
   }
@@ -824,6 +830,10 @@ class BackgroundSyncService {
     const fetchedOutpoints = new Map();
     const cachedOutpoints = new Map();
     const missingOutpoints = externalOutpoints.filter((outpoint) => {
+      if (this.windowLiveOutpoints?.has(outpoint)) {
+        cachedOutpoints.set(outpoint, this.windowLiveOutpoints.get(outpoint));
+        return false;
+      }
       const cached = this.getCachedLiveOutpoint(outpoint);
       if (cached === undefined) return true;
       cachedOutpoints.set(outpoint, cached);
@@ -859,9 +869,11 @@ class BackgroundSyncService {
     }
 
     for (const outpoint of mutations.spent || []) {
+      this.windowLiveOutpoints?.set(outpoint, null);
       this.liveCache.delete(outpoint);
     }
     for (const { outpoint, record } of mutations.created || []) {
+      this.windowLiveOutpoints?.set(outpoint, record);
       this.rememberLiveOutpoint(outpoint, record);
     }
 
@@ -874,8 +886,13 @@ class BackgroundSyncService {
       .map((entry) => entry.address)
       .filter((address) => {
         if (!address) return false;
+        if (this.windowAddressRecords?.has(address)) {
+          cachedAddresses.set(address, this.windowAddressRecords.get(address));
+          return false;
+        }
         const cached = this.getCachedAddress(address);
         if (cached === undefined) return true;
+        this.windowAddressRecords?.set(address, cached);
         cachedAddresses.set(address, cached);
         return false;
       });
@@ -889,11 +906,10 @@ class BackgroundSyncService {
         this.activeBlockMetrics.addressPrefetchKeys = addressKeys.length;
       }
       for (let index = 0; index < missingAddresses.length; index++) {
-        const existing = existingAddresses[index];
-        if (existing !== undefined) {
-          this.rememberAddress(missingAddresses[index], existing);
-          cachedAddresses.set(missingAddresses[index], existing);
-        }
+        const existing = existingAddresses[index] ?? null;
+        this.windowAddressRecords?.set(missingAddresses[index], existing);
+        if (existing) this.rememberAddress(missingAddresses[index], existing);
+        cachedAddresses.set(missingAddresses[index], existing);
       }
     }
 
@@ -904,6 +920,7 @@ class BackgroundSyncService {
       const merged = mergeAddressRecord(existing, entry.record);
       if (!merged) continue;
       if (!existing) newWallets += 1;
+      this.windowAddressRecords?.set(entry.address, merged);
       this.rememberAddress(entry.address, merged);
       writableAddresses.push({ address: entry.address, record: merged });
     }

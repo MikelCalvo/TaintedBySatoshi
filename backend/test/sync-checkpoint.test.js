@@ -369,6 +369,63 @@ test("equal or worse hops are not rewritten on replay", async () => {
   assert.equal(mutations.created[0].outpoint, "tx-a:0");
 });
 
+test("window-local state survives LRU eviction before the atomic commit", async () => {
+  const requested = [];
+  const stored = new Map([
+    ["u:seed-a:0", { d: 0, a: "seed", p: null, t: "seed-a", n: 50, o: "seed" }],
+    ["u:seed-b:0", { d: 0, a: "seed", p: null, t: "seed-b", n: 50, o: "seed" }],
+  ]);
+  const mainDb = createBatchDb();
+  mainDb.getMany = async (keys) => {
+    requested.push([...keys]);
+    return keys.map((key) => stored.get(key));
+  };
+  const service = createService({
+    mainDb,
+    bitcoinRPC: {
+      getAddressFromScript(script) {
+        return script?.address || null;
+      },
+      async getBlocksWindow() {
+        return [
+          {
+            height: 40,
+            hash: "hash-40",
+            block: {
+              tx: [{ txid: "child-a", vin: [{ txid: "seed-a", vout: 0 }], vout: [{ value: 50, scriptPubKey: { address: "alice" } }] }],
+            },
+          },
+          {
+            height: 41,
+            hash: "hash-41",
+            block: {
+              tx: [{ txid: "child-b", vin: [{ txid: "seed-b", vout: 0 }], vout: [{ value: 50, scriptPubKey: { address: "bob" } }] }],
+            },
+          },
+          {
+            height: 42,
+            hash: "hash-42",
+            block: {
+              tx: [{ txid: "child-c", vin: [{ txid: "child-a", vout: 0 }], vout: [{ value: 50, scriptPubKey: { address: "carol" } }] }],
+            },
+          },
+        ];
+      },
+    },
+  });
+  service.config.liveUtxoCacheSize = 1;
+  service.config.addressCacheSize = 1;
+
+  await service.syncNewBlocks(40, 42, mainDb);
+
+  assert.equal(requested.some((keys) => keys.includes("u:child-a:0")), false);
+  assert.equal(
+    mainDb.written.some((entry) => entry.key === "u:child-c:0"),
+    true
+  );
+  assert.equal(service.taintStats.taintedWallets, 3);
+});
+
 test("same-window spends reuse live outpoints without a second database read", async () => {
   const requested = [];
   const stored = new Map([
