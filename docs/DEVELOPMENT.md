@@ -46,24 +46,25 @@ npm run dev
 | `npm start` | Production server |
 | `npm run dev` | Development with hot reload |
 | `npm run check-node` | Test Bitcoin RPC connection |
-| `npm run update-satoshi-data` | Build/update taint database |
-| `npm run check-satoshi-data` | Show database statistics |
+| `npm run update-satoshi-data` | Extract Patoshi addresses |
+| `npm run check-satoshi-data` | Show live UTXO / wallet statistics |
 
 ### Database Initialization
 
-First run requires building the taint database:
+The backend sync service builds the taint database from genesis:
 
 ```bash
 cd backend
 npm run update-satoshi-data
+npm run dev
 ```
 
-This script:
+This:
 1. Extracts ~22,000 addresses from Patoshi blocks (first run: ~25-30 min)
-2. Scans blockchain for all tainted transactions (several hours)
-3. Builds connection paths in LevelDB
+2. Scans each block for live tainted UTXOs and shortest wallet hops
+3. Deletes spent tainted outputs in the same commit as the checkpoint
 
-Subsequent runs skip address extraction and continue from last block.
+Schema version 4 cannot resume a v3 historical database. Wipe `DB_PATH` first.
 
 ### Checking Node Connection
 

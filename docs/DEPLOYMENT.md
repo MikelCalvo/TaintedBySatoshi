@@ -37,8 +37,9 @@ pm2 start ecosystem.config.js
 pm2 save
 ```
 
-Keep the existing `.env` files and persistent `DB_PATH`/analytics paths in
-place. Do not replace or delete the database directories during deployment.
+Keep the existing `.env` files and analytics paths in place. Schema version 4
+cannot resume a v3 historical database: stop the backend, wipe `DB_PATH`, then
+restart so the live UTXO scan begins at genesis. Do not delete analytics.
 
 
 ## PM2 Commands

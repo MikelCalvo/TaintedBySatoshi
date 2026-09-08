@@ -35,7 +35,7 @@ Create `backend/.env` with these variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MAX_DEGREE` | Max transaction hops to track | `100` |
+| `MAX_DEGREE` | Max hop distance to persist (`0` = unlimited) | `0` |
 | `BATCH_SIZE` | Transactions per batch | `250` |
 | `BATCH_FLUSH_INTERVAL` | Batch write interval (ms) | `5000` |
 

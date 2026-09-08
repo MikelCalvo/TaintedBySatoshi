@@ -61,9 +61,9 @@ This process takes ~25-30 minutes on first run and is skipped on subsequent runs
 After extracting Satoshi's addresses, the application performs taint analysis:
 
 1. **Degree 0**: Satoshi's original addresses (~22,000)
-2. **Degree 1**: Addresses that received Bitcoin directly from Satoshi
+2. **Degree 1**: Addresses that received Bitcoin directly from a Satoshi coinbase
 3. **Degree 2**: Addresses that received from Degree 1 addresses
-4. **Degree N**: Continues up to `MAX_DEGREE` (default: 100)
+4. **Degree N**: Continues without a hop cap unless `MAX_DEGREE` is set above 0
 
 ### Why Outgoing Only?
 
