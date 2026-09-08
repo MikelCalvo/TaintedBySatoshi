@@ -176,16 +176,6 @@ async function processAddress(
       }
     }
 
-    // Store the transaction if not already stored
-    const txKey = `tx:${tx.hash}`;
-    let txExists = false;
-    try {
-      await db.get(txKey);
-      txExists = true;
-    } catch (err) {
-      txExists = false;
-    }
-
     // Store tinting information
     const taintData = {
       txHash: tx.hash,
@@ -198,17 +188,8 @@ async function processAddress(
 
     // Use batch if available, otherwise write individually
     if (batchContext && batchContext.batch) {
-      // Add to batch
-      if (!txExists) {
-        batchContext.batch.put(txKey, {
-          hash: tx.hash,
-          time: tx.time,
-          inputs: tx.inputs,
-          outputs: tx.out,
-          degree: currentDegree,
-        });
-        batchContext.count++;
-      }
+      // The immutable taint witness contains the transaction hash and amount;
+      // caching the complete transaction duplicates large historical data.
       batchContext.batch.put(`tainted:${address}`, taintData);
       batchContext.count++;
 
@@ -221,16 +202,7 @@ async function processAddress(
         batchContext.lastFlush = Date.now();
       }
     } else {
-      // Fallback to individual writes (for backward compatibility)
-      if (!txExists) {
-        await db.put(txKey, {
-          hash: tx.hash,
-          time: tx.time,
-          inputs: tx.inputs,
-          outputs: tx.out,
-          degree: currentDegree,
-        });
-      }
+      // Fallback to individual witness writes.
       await db.put(`tainted:${address}`, taintData);
     }
 
@@ -681,4 +653,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { updateSatoshiTransactions };
+module.exports = { processAddress, updateSatoshiTransactions };
