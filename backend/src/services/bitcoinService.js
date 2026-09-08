@@ -36,6 +36,10 @@ async function buildConnectionPath(db, address, taintedInfo, maxDepth = 10000) {
       if (error.code === "LEVEL_NOT_FOUND") break;
       throw error;
     }
+
+    if (Array.isArray(current?.path)) {
+      return [...current.path, ...reversed.reverse()];
+    }
   }
 
   return reversed.reverse();

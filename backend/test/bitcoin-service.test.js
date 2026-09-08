@@ -54,6 +54,111 @@ test("connection paths are reconstructed from compact parent edges", async () =>
   ]);
 });
 
+test("compact children preserve a legacy parent's full path", async () => {
+  const db = {
+    async get(key) {
+      assert.equal(key, "tainted:legacy-parent");
+      return {
+        degree: 2,
+        path: [
+          { from: "seed", to: "middle", txHash: "seed-tx", amount: 2 },
+          {
+            from: "middle",
+            to: "legacy-parent",
+            txHash: "legacy-tx",
+            amount: 1,
+          },
+        ],
+      };
+    },
+  };
+  const child = {
+    degree: 3,
+    parentAddress: "legacy-parent",
+    edge: {
+      from: "legacy-parent",
+      to: "child",
+      txHash: "child-tx",
+      amount: 0.5,
+    },
+  };
+
+  assert.deepEqual(await buildConnectionPath(db, "child", child), [
+    { from: "seed", to: "middle", txHash: "seed-tx", amount: 2 },
+    {
+      from: "middle",
+      to: "legacy-parent",
+      txHash: "legacy-tx",
+      amount: 1,
+    },
+    {
+      from: "legacy-parent",
+      to: "child",
+      txHash: "child-tx",
+      amount: 0.5,
+    },
+  ]);
+});
+
+test("legacy parents preserve full transaction summaries for compact children", async () => {
+  const originalInit = dbService.init;
+  const db = {
+    async get(key) {
+      if (key === "tainted:child") {
+        return {
+          degree: 3,
+          parentAddress: "legacy-parent",
+          edge: {
+            from: "legacy-parent",
+            to: "child",
+            txHash: "child-tx",
+            amount: 0.5,
+          },
+        };
+      }
+      if (key === "tainted:legacy-parent") {
+        return {
+          degree: 2,
+          path: [
+            {
+              from: "seed",
+              to: "legacy-parent",
+              txHash: "legacy-tx",
+              amount: 1,
+            },
+          ],
+        };
+      }
+      throw notFound();
+    },
+  };
+  dbService.init = async () => db;
+
+  try {
+    const result = await checkAddressConnection("child");
+    assert.deepEqual(result.connectionPath, [
+      {
+        from: "seed",
+        to: "legacy-parent",
+        txHash: "legacy-tx",
+        amount: 1,
+      },
+      {
+        from: "legacy-parent",
+        to: "child",
+        txHash: "child-tx",
+        amount: 0.5,
+      },
+    ]);
+    assert.deepEqual(result.transactions, [
+      { hash: "legacy-tx", amount: 1 },
+      { hash: "child-tx", amount: 0.5 },
+    ]);
+  } finally {
+    dbService.init = originalInit;
+  }
+});
+
 test("address checks derive transaction summaries from immutable path edges", async () => {
   const originalInit = dbService.init;
   const db = {
