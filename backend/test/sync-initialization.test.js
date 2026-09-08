@@ -48,6 +48,7 @@ test("undefined LevelDB reads count as missing seed wallets", async () => {
     async getMany(keys) {
       return keys.map(() => undefined);
     },
+    async *iterator() {},
     batch() {
       return {
         put(key, value) {
@@ -75,6 +76,107 @@ test("undefined LevelDB reads count as missing seed wallets", async () => {
     ["a:seed-a", "a:seed-b", "seeds_initialized"]
   );
   assert.equal(service.taintStats.taintedWallets, 2);
+});
+
+test("seed initialization advances the checkpoint wallet count atomically", async () => {
+  const stored = [];
+  const progress = {
+    lastBlock: 42,
+    blockHash: "hash-42",
+    schemaVersion: 4,
+    liveOutpoints: 3,
+    taintedWallets: 5,
+  };
+  const db = {
+    async get(key) {
+      if (key === "scan_progress") return progress;
+      throw Object.assign(new Error("not found"), { code: "LEVEL_NOT_FOUND" });
+    },
+    async getMany() {
+      return [{ d: 0 }, undefined];
+    },
+    async *iterator() {
+      for (let index = 0; index < 5; index++) yield [`a:existing-${index}`, {}];
+    },
+    batch() {
+      return {
+        put(key, value) {
+          stored.push({ key, value });
+        },
+        async write() {},
+      };
+    },
+  };
+  const service = new BackgroundSyncService({
+    bitcoinRPC: { async initialize() {} },
+    dbService: { async init() { return db; } },
+    logger: { info() {}, error() {} },
+    satoshiAddresses: ["already-seeded", "missing-seed"],
+  });
+
+  await service.ensureSeedWallets(db);
+
+  assert.deepEqual(
+    stored.find((entry) => entry.key === "scan_progress")?.value,
+    { ...progress, taintedWallets: 6 }
+  );
+  assert.equal(
+    stored.find((entry) => entry.key === "seeds_initialized")?.value
+      ?.progressCounted,
+    true
+  );
+});
+
+test("legacy seed markers reconcile the exact persisted wallet count once", async () => {
+  const stored = [];
+  const progress = {
+    lastBlock: 42,
+    blockHash: "hash-42",
+    schemaVersion: 4,
+    liveOutpoints: 3,
+    taintedWallets: 1,
+  };
+  const db = {
+    async get(key) {
+      if (key === "seeds_initialized") return { count: 2 };
+      if (key === "scan_progress") return progress;
+      throw Object.assign(new Error("not found"), { code: "LEVEL_NOT_FOUND" });
+    },
+    async getMany() {
+      return [{ d: 0 }, { d: 0 }];
+    },
+    async *iterator() {
+      yield ["a:seed-a", {}];
+      yield ["a:seed-b", {}];
+      yield ["a:descendant", {}];
+    },
+    batch() {
+      return {
+        put(key, value) {
+          stored.push({ key, value });
+        },
+        async write() {},
+      };
+    },
+  };
+  const service = new BackgroundSyncService({
+    bitcoinRPC: { async initialize() {} },
+    dbService: { async init() { return db; } },
+    logger: { info() {}, error() {} },
+    satoshiAddresses: ["seed-a", "seed-b"],
+  });
+
+  await service.ensureSeedWallets(db);
+
+  assert.deepEqual(
+    stored.find((entry) => entry.key === "scan_progress")?.value,
+    { ...progress, taintedWallets: 3 }
+  );
+  assert.equal(
+    stored.find((entry) => entry.key === "seeds_initialized")?.value
+      ?.progressCounted,
+    true
+  );
 });
 
 test("seed wallet initialization aborts instead of marking partial seeds ready", async () => {

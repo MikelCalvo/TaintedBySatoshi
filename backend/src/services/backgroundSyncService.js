@@ -221,6 +221,14 @@ class BackgroundSyncService {
     );
   }
 
+  async countWalletRecords(db) {
+    let count = 0;
+    for await (const [key] of db.iterator({ gte: "a:", lt: "b:" })) {
+      if (typeof key === "string" && key.startsWith("a:")) count += 1;
+    }
+    return count;
+  }
+
   async ensureSeedWallets(db) {
     const scanDb = db || (await this.dbService.init());
     let marker = null;
@@ -229,11 +237,10 @@ class BackgroundSyncService {
     } catch (err) {
       if (err.code !== "LEVEL_NOT_FOUND") throw err;
     }
-    if (marker?.count === SATOSHI_ADDRESSES.length) {
-      this.taintStats.taintedWallets = Math.max(
-        this.taintStats.taintedWallets,
-        SATOSHI_ADDRESSES.length
-      );
+    if (
+      marker?.count === SATOSHI_ADDRESSES.length &&
+      marker.progressCounted === true
+    ) {
       return;
     }
 
@@ -246,19 +253,30 @@ class BackgroundSyncService {
       batch.put(`a:${SATOSHI_ADDRESSES[index]}`, this.seedRecord(SATOSHI_ADDRESSES[index]));
       missing += 1;
     }
+
+    let progress = null;
+    try {
+      progress = await scanDb.get("scan_progress");
+    } catch (err) {
+      if (err.code !== "LEVEL_NOT_FOUND") throw err;
+    }
+
+    const persistedWallets = await this.countWalletRecords(scanDb);
+    const taintedWallets = persistedWallets + missing;
     batch.put("seeds_initialized", {
       count: SATOSHI_ADDRESSES.length,
+      progressCounted: true,
       timestamp: Date.now(),
     });
+    if (progress) {
+      batch.put("scan_progress", { ...progress, taintedWallets });
+    }
     await batch.write();
-    this.taintStats.taintedWallets = Math.max(
-      this.taintStats.taintedWallets,
-      SATOSHI_ADDRESSES.length
-    );
+    this.taintStats.taintedWallets = taintedWallets;
     this.logger.info(
       missing > 0
         ? `Initialized ${missing.toLocaleString()} missing Satoshi wallets at 0 hops`
-        : `Satoshi wallet seed marker written for ${SATOSHI_ADDRESSES.length.toLocaleString()} addresses`
+        : `Reconciled ${taintedWallets.toLocaleString()} persisted tainted wallets`
     );
   }
 
@@ -763,7 +781,8 @@ class BackgroundSyncService {
     return (
       this.isRunning &&
       this.dbReady &&
-      (this.phase === "ready" || (this.phase === "syncing" && caughtUp))
+      (this.phase === "ready" || this.phase === "syncing") &&
+      caughtUp
     );
   }
 
