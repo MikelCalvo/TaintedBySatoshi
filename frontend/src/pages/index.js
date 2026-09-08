@@ -1,4 +1,5 @@
-import { Container, Box, Typography } from "@mui/material";
+import { Container, Box, Typography, Link } from "@mui/material";
+import NextLink from "next/link";
 import AddressSearchForm from "../components/AddressSearchForm";
 import FamousWalletsSuggestions from "../components/FamousWalletsSuggestions";
 import SEO from "../components/SEO";
@@ -8,7 +9,7 @@ export default function Home() {
     <>
       <SEO
         title="Check Bitcoin Address Connections"
-        description="Check if a Bitcoin address has any connection to Satoshi Nakamoto's wallets through transaction history. Track direct and indirect connections."
+        description="Browse Bitcoin wallets connected to Satoshi Nakamoto and the hop count of each connection."
         path="/"
       />
 
@@ -18,12 +19,20 @@ export default function Home() {
             Tainted By Satoshi
           </Typography>
           <Typography variant="h6" color="text.secondary" gutterBottom>
-            Check if a Bitcoin address has any connection to Satoshi Nakamoto&apos;s
-            wallets
+            List every Bitcoin wallet connected to Satoshi Nakamoto and the hop
+            count of that connection
           </Typography>
         </Box>
 
         <AddressSearchForm showNote={true} />
+
+        <Box sx={{ textAlign: "center", mb: 6 }}>
+          <Typography variant="body2">
+            <Link component={NextLink} href="/wallets" underline="hover">
+              Browse all tainted wallets
+            </Link>
+          </Typography>
+        </Box>
 
         <FamousWalletsSuggestions />
       </Container>

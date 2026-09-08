@@ -280,10 +280,22 @@ export default function Status() {
                         color="text.secondary"
                         gutterBottom
                       >
-                        Addresses Updated
+                        Tainted Wallets
                       </Typography>
                       <Typography>
-                        {formatNumber(syncStatus.stats.addressesUpdated)}
+                        {formatNumber(syncStatus.stats.taintedWallets)}
+                      </Typography>
+                    </Grid>
+                    <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                      <Typography
+                        variant="subtitle2"
+                        color="text.secondary"
+                        gutterBottom
+                      >
+                        Live Tainted UTXOs
+                      </Typography>
+                      <Typography>
+                        {formatNumber(syncStatus.stats.liveOutpoints)}
                       </Typography>
                     </Grid>
                     <Grid size={{ xs: 12, sm: 6, md: 3 }}>
@@ -352,7 +364,7 @@ export default function Status() {
                   {pipeline && (
                     <Grid size={12}>
                       <Typography variant="caption" color="text.secondary">
-                        Main database lookup: {pipeline.mainPrefetchSeconds.toFixed(1)}s average · Commit: {pipeline.commitSeconds.toFixed(1)}s average · {pipeline.samples} measured blocks
+                        Address lookup: {pipeline.addressPrefetchSeconds.toFixed(1)}s average · Commit: {pipeline.commitSeconds.toFixed(1)}s average · {pipeline.samples} measured blocks
                       </Typography>
                     </Grid>
                   )}

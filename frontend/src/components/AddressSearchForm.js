@@ -217,8 +217,8 @@ export default function AddressSearchForm({ showNote = false }) {
             align="center"
             sx={{ mt: 2 }}
           >
-            Note: This tool only tracks outgoing transactions from Satoshi{"'"}s
-            known addresses to avoid false positives.
+            Note: hops count outgoing taint from Patoshi/Satoshi coinbases.
+            Paying a Satoshi address does not taint the sender.
           </Typography>
         </>
       )}

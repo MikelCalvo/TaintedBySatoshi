@@ -4,6 +4,7 @@ function generateSitemap() {
   const pages = [
     { path: "/", priority: "1.0", changefreq: "daily" },
     { path: "/status", priority: "0.5", changefreq: "hourly" },
+    { path: "/wallets", priority: "0.8", changefreq: "hourly" },
     { path: "/stats", priority: "0.5", changefreq: "daily" },
   ];
 

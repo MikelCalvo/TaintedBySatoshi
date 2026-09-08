@@ -113,6 +113,20 @@ export function Footer() {
             {" • "}
             <Link
               component={NextLink}
+              href="/wallets"
+              color="primary"
+              underline="none"
+              sx={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 0.5,
+              }}
+            >
+              Wallets
+            </Link>
+            {" • "}
+            <Link
+              component={NextLink}
               href="/stats"
               color="primary"
               underline="none"

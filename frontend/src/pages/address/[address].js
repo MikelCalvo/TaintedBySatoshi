@@ -13,6 +13,11 @@ import {
   Stack,
   CircularProgress,
   Link,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
 } from "@mui/material";
 import { ArrowBack, Info } from "@mui/icons-material";
 import AddressSearchForm from "../../components/AddressSearchForm";
@@ -160,7 +165,7 @@ export default function AddressPage({ address, initialLoad }) {
     <>
       <SEO
         title={address}
-        description={`Check if Bitcoin address ${address} has any connection to Satoshi Nakamoto's wallets through transaction history.`}
+        description={`Hop count and connection path from Satoshi to Bitcoin address ${address}.`}
         path={`/address/${address}`}
       />
 
@@ -305,6 +310,43 @@ export default function AddressPage({ address, initialLoad }) {
 
                     {data.isConnected ? (
                       <>
+                        {Array.isArray(data.connectionPath) &&
+                          data.connectionPath.length > 0 && (
+                            <>
+                              <Divider />
+                              <Box>
+                                <Typography variant="h6" gutterBottom>
+                                  Shortest hop path
+                                </Typography>
+                                <Table size="small">
+                                  <TableHead>
+                                    <TableRow>
+                                      <TableCell>Hop</TableCell>
+                                      <TableCell>From</TableCell>
+                                      <TableCell>To</TableCell>
+                                      <TableCell>Transaction</TableCell>
+                                    </TableRow>
+                                  </TableHead>
+                                  <TableBody>
+                                    {data.connectionPath.map((edge) => (
+                                      <TableRow key={`${edge.txHash}-${edge.to}`}>
+                                        <TableCell>{edge.hops}</TableCell>
+                                        <TableCell sx={{ fontFamily: "monospace" }}>
+                                          {edge.from}
+                                        </TableCell>
+                                        <TableCell sx={{ fontFamily: "monospace" }}>
+                                          {edge.to}
+                                        </TableCell>
+                                        <TableCell sx={{ fontFamily: "monospace" }}>
+                                          {edge.txHash}
+                                        </TableCell>
+                                      </TableRow>
+                                    ))}
+                                  </TableBody>
+                                </Table>
+                              </Box>
+                            </>
+                          )}
                         <Divider />
                         <Box>
                           <Typography

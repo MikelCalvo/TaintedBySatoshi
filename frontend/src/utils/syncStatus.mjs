@@ -35,7 +35,7 @@ export function getPipelineSummary(status) {
   return {
     throughput: status.metrics.blocksPerSecond || 0,
     averageBlockSeconds: (pipeline.averageMs?.total || 0) / 1000,
-    mainPrefetchSeconds: (pipeline.averageMs?.mainPrefetch || 0) / 1000,
+    addressPrefetchSeconds: (pipeline.averageMs?.addressPrefetch || 0) / 1000,
     commitSeconds: (pipeline.averageMs?.commit || 0) / 1000,
     samples: pipeline.samples,
   };

@@ -32,14 +32,14 @@ test("pipeline summary exposes average timings only after samples exist", async 
         blocksPerSecond: 0.025,
         pipeline: {
           samples: 5,
-          averageMs: { total: 40000, mainPrefetch: 37000, commit: 2000 },
+          averageMs: { total: 40000, addressPrefetch: 37000, commit: 2000 },
         },
       },
     }),
     {
       throughput: 0.025,
       averageBlockSeconds: 40,
-      mainPrefetchSeconds: 37,
+      addressPrefetchSeconds: 37,
       commitSeconds: 2,
       samples: 5,
     }
