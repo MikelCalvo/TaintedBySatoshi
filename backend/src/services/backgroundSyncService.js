@@ -1,4 +1,3 @@
-require("dotenv").config();
 const dbService = require("./dbService");
 const bitcoinRPC = require("./bitcoinRPC");
 const logger = require("../utils/logger");
@@ -58,6 +57,7 @@ class BackgroundSyncService {
     this.committedBlocks = [];
     this.blockMetrics = [];
     this.windowMetrics = null;
+    this.prefetchedWindow = null;
     this.activeBlockMetrics = null;
     this.durableCheckpoint = { height: null, hash: null, updatedAt: null };
     this.syncInterval = null;
@@ -86,6 +86,16 @@ class BackgroundSyncService {
         32
       ),
       maxDegree: boundedDegree(process.env.MAX_DEGREE),
+      liveUtxoCacheSize: boundedPositiveInt(
+        process.env.LIVE_UTXO_CACHE_SIZE,
+        250000,
+        1000000
+      ),
+      addressCacheSize: boundedPositiveInt(
+        process.env.ADDRESS_CACHE_SIZE,
+        250000,
+        1000000
+      ),
     };
 
     this.mainBatch = null;
@@ -95,6 +105,48 @@ class BackgroundSyncService {
     this.mainDb = null;
     this.dbReady = false;
     this.starting = null;
+    this.liveCache = new Map();
+    this.addressCache = new Map();
+  }
+
+  rememberBounded(cache, limit, key, value) {
+    if (cache.has(key)) cache.delete(key);
+    cache.set(key, value);
+    if (cache.size > limit) cache.delete(cache.keys().next().value);
+  }
+
+  getBounded(cache, key) {
+    const value = cache.get(key);
+    if (value === undefined) return undefined;
+    cache.delete(key);
+    cache.set(key, value);
+    return value;
+  }
+
+  rememberLiveOutpoint(outpoint, record) {
+    this.rememberBounded(
+      this.liveCache,
+      this.config.liveUtxoCacheSize,
+      outpoint,
+      record
+    );
+  }
+
+  getCachedLiveOutpoint(outpoint) {
+    return this.getBounded(this.liveCache, outpoint);
+  }
+
+  rememberAddress(address, record) {
+    this.rememberBounded(
+      this.addressCache,
+      this.config.addressCacheSize,
+      address,
+      record
+    );
+  }
+
+  getCachedAddress(address) {
+    return this.getBounded(this.addressCache, address);
   }
 
   async start() {
@@ -148,22 +200,65 @@ class BackgroundSyncService {
     }
   }
 
-  async initializeSeedWallets() {
-    const db = await this.dbService.init();
-    const batch = db.batch();
+  seedRecord(address) {
+    return { d: 0, p: null, t: null, n: 0, o: address };
+  }
+
+  async initializeSeedWallets(db) {
+    const scanDb = db || (await this.dbService.init());
+    const batch = scanDb.batch();
     for (const address of SATOSHI_ADDRESSES) {
-      batch.put(`a:${address}`, {
-        d: 0,
-        p: null,
-        t: null,
-        n: 0,
-        o: address,
-      });
+      batch.put(`a:${address}`, this.seedRecord(address));
     }
+    batch.put("seeds_initialized", {
+      count: SATOSHI_ADDRESSES.length,
+      timestamp: Date.now(),
+    });
     await batch.write();
     this.taintStats.taintedWallets = SATOSHI_ADDRESSES.length;
     this.logger.info(
       `Initialized ${SATOSHI_ADDRESSES.length.toLocaleString()} Satoshi wallets at 0 hops`
+    );
+  }
+
+  async ensureSeedWallets(db) {
+    const scanDb = db || (await this.dbService.init());
+    let marker = null;
+    try {
+      marker = await scanDb.get("seeds_initialized");
+    } catch (err) {
+      if (err.code !== "LEVEL_NOT_FOUND") throw err;
+    }
+    if (marker?.count === SATOSHI_ADDRESSES.length) {
+      this.taintStats.taintedWallets = Math.max(
+        this.taintStats.taintedWallets,
+        SATOSHI_ADDRESSES.length
+      );
+      return;
+    }
+
+    const keys = SATOSHI_ADDRESSES.map((address) => `a:${address}`);
+    const existing = keys.length > 0 ? await scanDb.getMany(keys) : [];
+    const batch = scanDb.batch();
+    let missing = 0;
+    for (let index = 0; index < SATOSHI_ADDRESSES.length; index++) {
+      if (existing[index]) continue;
+      batch.put(`a:${SATOSHI_ADDRESSES[index]}`, this.seedRecord(SATOSHI_ADDRESSES[index]));
+      missing += 1;
+    }
+    batch.put("seeds_initialized", {
+      count: SATOSHI_ADDRESSES.length,
+      timestamp: Date.now(),
+    });
+    await batch.write();
+    this.taintStats.taintedWallets = Math.max(
+      this.taintStats.taintedWallets,
+      SATOSHI_ADDRESSES.length
+    );
+    this.logger.info(
+      missing > 0
+        ? `Initialized ${missing.toLocaleString()} missing Satoshi wallets at 0 hops`
+        : `Satoshi wallet seed marker written for ${SATOSHI_ADDRESSES.length.toLocaleString()} addresses`
     );
   }
 
@@ -238,20 +333,7 @@ class BackgroundSyncService {
       this.logger.info("[Init] Main database ready");
 
       this.logger.info("[Init] Step 4: Checking Satoshi wallet seeds...");
-      let needsAddressInit = false;
-      try {
-        await db.get(`a:${SATOSHI_ADDRESSES[0]}`);
-        this.logger.info("[Init] Satoshi wallets already initialized");
-      } catch (err) {
-        if (err.code !== "LEVEL_NOT_FOUND") throw err;
-        needsAddressInit = true;
-      }
-
-      if (needsAddressInit) {
-        this.logger.info("[Init] Initializing Satoshi wallets...");
-        await this.initializeSeedWallets();
-      }
-
+      await this.ensureSeedWallets(db);
       this.logger.info("[Init] Initialization checks completed");
     } catch (error) {
       this.logger.error("[Init] Error during initialization:", error.message);
@@ -363,40 +445,104 @@ class BackgroundSyncService {
     }
   }
 
+  applyWindowMutation(puts, dels, type, key, value) {
+    if (type === "del") {
+      if (puts.has(key)) {
+        puts.delete(key);
+        return;
+      }
+      dels.add(key);
+      return;
+    }
+    dels.delete(key);
+    puts.set(key, value);
+  }
+
+  fetchBlocksWindow(startBlock, endBlock) {
+    if (this.bitcoinRPC.getBlocksWindow) {
+      return this.bitcoinRPC.getBlocksWindow(
+        startBlock,
+        endBlock,
+        this.config.prefetchConcurrency
+      );
+    }
+    return Promise.all(
+      Array.from({ length: endBlock - startBlock + 1 }, async (_, index) => {
+        const height = startBlock + index;
+        const hash = await this.bitcoinRPC.call("getblockhash", [height]);
+        const block = await this.bitcoinRPC.call("getblock", [hash, 2]);
+        return { height, hash, block };
+      })
+    );
+  }
+
+  scheduleWindowPrefetch(startBlock, endBlock) {
+    if (startBlock > endBlock) return;
+    const range = { startBlock, endBlock };
+    const startedAt = this.now();
+    const promise = this.fetchBlocksWindow(startBlock, endBlock);
+    // A subsequent sync consumes and surfaces a prefetch failure. Attach a no-op
+    // observer now so a failed speculative request never becomes unhandled.
+    promise.catch(() => {});
+    this.prefetchedWindow = { range, startedAt, promise };
+  }
+
+  async loadBlocksWindow(startBlock, endBlock) {
+    const cached = this.prefetchedWindow;
+    if (
+      cached &&
+      cached.range.startBlock === startBlock &&
+      cached.range.endBlock === endBlock
+    ) {
+      this.prefetchedWindow = null;
+      return { blocks: await cached.promise, prefetchMs: this.now() - cached.startedAt };
+    }
+    const startedAt = this.now();
+    return {
+      blocks: await this.fetchBlocksWindow(startBlock, endBlock),
+      prefetchMs: this.now() - startedAt,
+    };
+  }
+
   async syncNewBlocks(startBlock, endBlock, scanDb) {
     const db = await this.dbService.init();
     this.mainDb = db;
     let processedBlocks = 0;
 
     try {
-      const prefetchStartedAt = this.now();
-      const prefetched = this.bitcoinRPC.getBlocksWindow
-        ? await this.bitcoinRPC.getBlocksWindow(
-            startBlock,
-            endBlock,
-            this.config.prefetchConcurrency
-          )
-        : await Promise.all(
-            Array.from(
-              { length: endBlock - startBlock + 1 },
-              async (_, index) => {
-                const height = startBlock + index;
-                const hash = await this.bitcoinRPC.call("getblockhash", [height]);
-                const block = await this.bitcoinRPC.call("getblock", [hash, 2]);
-                return { height, hash, block };
-              }
-            )
-          );
+      const syncStartedAt = this.now();
+      const { blocks: prefetched, prefetchMs } = await this.loadBlocksWindow(
+        startBlock,
+        endBlock
+      );
       this.windowMetrics = {
         startBlock,
         endBlock,
         blocks: prefetched.length,
-        prefetchMs: this.now() - prefetchStartedAt,
+        prefetchMs,
+        commitMs: 0,
+        totalMs: 0,
+        blocksPerSecond: 0,
       };
+
+      const nextStartBlock = endBlock + 1;
+      const nextEndBlock = Math.min(
+        nextStartBlock + this.config.chunkSize - 1,
+        this.currentHeight ?? endBlock
+      );
+      if (nextStartBlock <= nextEndBlock) {
+        this.scheduleWindowPrefetch(nextStartBlock, nextEndBlock);
+      }
+
+      const windowPuts = new Map();
+      const windowDels = new Set();
+      const blockTimings = [];
+      let newWallets = 0;
+      let lastHeight = null;
+      let lastHash = null;
 
       for (const { height, hash, block } of prefetched) {
         this.currentBlock = height;
-        this.resetBatch();
         const blockStartedAt = this.now();
         this.activeBlockMetrics = {
           inputLookupMs: 0,
@@ -412,67 +558,106 @@ class BackgroundSyncService {
         const processingMs = this.now() - processingStartedAt;
 
         for (const outpoint of mutations.spent || []) {
-          if (!this.safeBatchDel(`u:${outpoint}`)) {
-            throw new Error("Main database batch is not writable");
-          }
+          this.applyWindowMutation(windowPuts, windowDels, "del", `u:${outpoint}`);
         }
         for (const { outpoint, record } of mutations.created || []) {
-          if (!this.safeBatchPut(`u:${outpoint}`, record)) {
-            throw new Error("Main database batch is not writable");
-          }
+          this.applyWindowMutation(
+            windowPuts,
+            windowDels,
+            "put",
+            `u:${outpoint}`,
+            record
+          );
         }
         for (const { address, record } of mutations.addresses || []) {
-          if (!this.safeBatchPut(`a:${address}`, record)) {
-            throw new Error("Main database batch is not writable");
-          }
+          this.applyWindowMutation(
+            windowPuts,
+            windowDels,
+            "put",
+            `a:${address}`,
+            record
+          );
         }
-
-        const nextLiveOutpoints =
-          this.taintStats.liveOutpoints +
-          (mutations.created?.length || 0) -
-          (mutations.spent?.length || 0);
-        const nextTaintedWallets =
-          this.taintStats.taintedWallets + (mutations.newWallets || 0);
-
-        if (
-          !this.safeBatchPut("scan_progress", {
-            lastBlock: height,
-            blockHash: hash,
-            schemaVersion: SCHEMA_VERSION,
-            lastUpdated: Date.now(),
-            liveOutpoints: nextLiveOutpoints,
-            taintedWallets: nextTaintedWallets,
-          })
-        ) {
-          throw new Error("Main database batch is not writable");
-        }
-        const batchOperations = this.batchCount;
-        const commitStartedAt = this.now();
-        await this.flushBatch();
-        this.taintStats.liveOutpoints = nextLiveOutpoints;
-        this.taintStats.taintedWallets = nextTaintedWallets;
-        this.syncStats.addressesUpdated += mutations.addresses?.length || 0;
-        const commitMs = this.now() - commitStartedAt;
-
-        this.recordBlockMetrics({
+        newWallets += mutations.newWallets || 0;
+        lastHeight = height;
+        lastHash = hash;
+        blockTimings.push({
           height,
           totalMs: this.now() - blockStartedAt,
           inputLookupMs: this.activeBlockMetrics.inputLookupMs,
           addressPrefetchMs: this.activeBlockMetrics.addressPrefetchMs,
           processingMs,
-          commitMs,
+          commitMs: 0,
           externalOutpoints: this.activeBlockMetrics.externalOutpoints,
           addressPrefetchKeys: this.activeBlockMetrics.addressPrefetchKeys,
           taintedOutputs: this.activeBlockMetrics.taintedOutputs,
           spentOutpoints: this.activeBlockMetrics.spentOutpoints,
           addressWrites: this.activeBlockMetrics.addressWrites,
-          batchOperations,
         });
         this.activeBlockMetrics = null;
-
         processedBlocks++;
-        this.syncStats.blocksProcessed++;
-        this.recordCommittedBlock(height, hash);
+      }
+
+      this.resetBatch();
+      for (const key of windowDels) {
+        if (!this.safeBatchDel(key)) {
+          throw new Error("Main database batch is not writable");
+        }
+      }
+      for (const [key, value] of windowPuts) {
+        if (!this.safeBatchPut(key, value)) {
+          throw new Error("Main database batch is not writable");
+        }
+      }
+
+      const nextLiveOutpoints =
+        this.taintStats.liveOutpoints +
+        [...windowPuts.keys()].filter((key) => key.startsWith("u:")).length -
+        [...windowDels].filter((key) => key.startsWith("u:")).length;
+      const nextTaintedWallets = this.taintStats.taintedWallets + newWallets;
+
+      if (
+        lastHeight !== null &&
+        !this.safeBatchPut("scan_progress", {
+          lastBlock: lastHeight,
+          blockHash: lastHash,
+          schemaVersion: SCHEMA_VERSION,
+          lastUpdated: Date.now(),
+          liveOutpoints: nextLiveOutpoints,
+          taintedWallets: nextTaintedWallets,
+        })
+      ) {
+        throw new Error("Main database batch is not writable");
+      }
+
+      const batchOperations = this.batchCount;
+      const commitStartedAt = this.now();
+      await this.flushBatch();
+      const commitMs = this.now() - commitStartedAt;
+      this.windowMetrics.commitMs = commitMs;
+      this.windowMetrics.totalMs = this.now() - syncStartedAt;
+      this.windowMetrics.blocksPerSecond =
+        this.windowMetrics.totalMs > 0
+          ? Number(
+              ((processedBlocks * 1000) / this.windowMetrics.totalMs).toFixed(3)
+            )
+          : 0;
+      this.taintStats.liveOutpoints = nextLiveOutpoints;
+      this.taintStats.taintedWallets = nextTaintedWallets;
+      this.syncStats.addressesUpdated += newWallets;
+      this.syncStats.blocksProcessed += processedBlocks;
+
+      for (const timing of blockTimings) {
+        const isLast = timing.height === lastHeight;
+        this.recordBlockMetrics({
+          ...timing,
+          commitMs: isLast ? commitMs : 0,
+          totalMs: timing.totalMs + (isLast ? commitMs : 0),
+          batchOperations: isLast ? batchOperations : 0,
+        });
+      }
+      if (lastHeight !== null) {
+        this.recordCommittedBlock(lastHeight, lastHash);
       }
 
       this.syncStats.lastSyncTime = new Date().toISOString();
@@ -483,6 +668,8 @@ class BackgroundSyncService {
       this.logger.error("[Background Sync] Error in syncNewBlocks:", error.message);
       this.syncStats.errors++;
       this.batchIsValid = false;
+      this.liveCache.clear();
+      this.addressCache.clear();
       throw error;
     } finally {
       this.activeBlockMetrics = null;
@@ -615,26 +802,34 @@ class BackgroundSyncService {
       }
     }
 
-    const live = new Map();
-    if (externalOutpoints.length > 0) {
-      const keys = externalOutpoints.map((outpoint) => `u:${outpoint}`);
+    const fetchedOutpoints = new Map();
+    const cachedOutpoints = new Map();
+    const missingOutpoints = externalOutpoints.filter((outpoint) => {
+      const cached = this.getCachedLiveOutpoint(outpoint);
+      if (cached === undefined) return true;
+      cachedOutpoints.set(outpoint, cached);
+      return false;
+    });
+    if (missingOutpoints.length > 0) {
+      const keys = missingOutpoints.map((outpoint) => `u:${outpoint}`);
       const inputLookupStartedAt = this.now();
       const values = await db.getMany(keys);
       if (this.activeBlockMetrics) {
         this.activeBlockMetrics.inputLookupMs += this.now() - inputLookupStartedAt;
-        this.activeBlockMetrics.externalOutpoints = externalOutpoints.length;
+        this.activeBlockMetrics.externalOutpoints = missingOutpoints.length;
       }
-      for (let index = 0; index < externalOutpoints.length; index++) {
+      for (let index = 0; index < missingOutpoints.length; index++) {
         const value = values[index];
-        if (value !== undefined) {
-          live.set(externalOutpoints[index], value);
-        }
+        if (value) fetchedOutpoints.set(missingOutpoints[index], value);
       }
+    } else if (this.activeBlockMetrics) {
+      this.activeBlockMetrics.externalOutpoints = externalOutpoints.length;
     }
 
     const raw = processBlockTaint(mapped, {
       isSeedAddress: (address) => SATOSHI_ADDRESS_SET.has(address),
-      getOutpoint: (outpoint) => live.get(outpoint),
+      getOutpoint: (outpoint) =>
+        cachedOutpoints.get(outpoint) || fetchedOutpoints.get(outpoint),
       maxDegree: this.config.maxDegree,
     });
     const mutations = netMutations(raw);
@@ -644,30 +839,53 @@ class BackgroundSyncService {
       this.activeBlockMetrics.spentOutpoints = mutations.spent.length;
     }
 
+    for (const outpoint of mutations.spent || []) {
+      this.liveCache.delete(outpoint);
+    }
+    for (const { outpoint, record } of mutations.created || []) {
+      this.rememberLiveOutpoint(outpoint, record);
+    }
+
     if (mutations.created.length === 0 && mutations.addresses.length === 0) {
       return { ...mutations, newWallets: 0 };
     }
 
-    const addressKeys = mutations.addresses.map((entry) => `a:${entry.address}`);
-    let existingAddresses = [];
-    if (addressKeys.length > 0) {
+    const cachedAddresses = new Map();
+    const missingAddresses = mutations.addresses
+      .map((entry) => entry.address)
+      .filter((address) => {
+        if (!address) return false;
+        const cached = this.getCachedAddress(address);
+        if (cached === undefined) return true;
+        cachedAddresses.set(address, cached);
+        return false;
+      });
+    if (missingAddresses.length > 0) {
+      const addressKeys = missingAddresses.map((address) => `a:${address}`);
       const addressPrefetchStartedAt = this.now();
-      existingAddresses = await db.getMany(addressKeys);
+      const existingAddresses = await db.getMany(addressKeys);
       if (this.activeBlockMetrics) {
         this.activeBlockMetrics.addressPrefetchMs +=
           this.now() - addressPrefetchStartedAt;
         this.activeBlockMetrics.addressPrefetchKeys = addressKeys.length;
       }
+      for (let index = 0; index < missingAddresses.length; index++) {
+        const existing = existingAddresses[index];
+        if (existing !== undefined) {
+          this.rememberAddress(missingAddresses[index], existing);
+          cachedAddresses.set(missingAddresses[index], existing);
+        }
+      }
     }
 
     const writableAddresses = [];
     let newWallets = 0;
-    for (let index = 0; index < mutations.addresses.length; index++) {
-      const entry = mutations.addresses[index];
-      const existing = existingAddresses[index];
+    for (const entry of mutations.addresses) {
+      const existing = cachedAddresses.get(entry.address);
       const merged = mergeAddressRecord(existing, entry.record);
       if (!merged) continue;
       if (!existing) newWallets += 1;
+      this.rememberAddress(entry.address, merged);
       writableAddresses.push({ address: entry.address, record: merged });
     }
     if (this.activeBlockMetrics) {
@@ -767,12 +985,14 @@ class BackgroundSyncService {
       lastError: this.lastError,
       metrics: {
         blocksPerSecond:
-          this.committedBlocks.length >= 2
-            ? (this.committedBlocks.length - 1) /
+          this.windowMetrics?.blocksPerSecond ||
+          (this.committedBlocks.length >= 2
+            ? (this.committedBlocks.at(-1).height -
+                this.committedBlocks[0].height) /
               ((this.committedBlocks.at(-1).timestamp -
                 this.committedBlocks[0].timestamp) /
                 1000)
-            : 0,
+            : 0),
         pipeline: this.getPipelineMetrics(),
       },
       stats: {
@@ -788,6 +1008,8 @@ class BackgroundSyncService {
         chunkSize: this.config.chunkSize,
         prefetchConcurrency: this.config.prefetchConcurrency,
         maxDegree: this.config.maxDegree,
+        liveUtxoCacheSize: this.config.liveUtxoCacheSize,
+        addressCacheSize: this.config.addressCacheSize,
         schemaVersion: SCHEMA_VERSION,
       },
       storage: {

@@ -39,6 +39,44 @@ test("database initialization is single-flight", async () => {
   assert.equal(opens, 1);
 });
 
+test("undefined LevelDB reads count as missing seed wallets", async () => {
+  const stored = [];
+  const db = {
+    async get() {
+      return undefined;
+    },
+    async getMany(keys) {
+      return keys.map(() => undefined);
+    },
+    batch() {
+      return {
+        put(key, value) {
+          stored.push({ key, value });
+        },
+        async write() {},
+      };
+    },
+  };
+  const service = new BackgroundSyncService({
+    bitcoinRPC: { async initialize() {} },
+    dbService: {
+      async init() {
+        return db;
+      },
+    },
+    logger: { info() {}, error() {} },
+    satoshiAddresses: ["seed-a", "seed-b"],
+  });
+
+  await service.ensureSeedWallets(db);
+
+  assert.deepEqual(
+    stored.map((entry) => entry.key).sort(),
+    ["a:seed-a", "a:seed-b", "seeds_initialized"]
+  );
+  assert.equal(service.taintStats.taintedWallets, 2);
+});
+
 test("seed wallet initialization aborts instead of marking partial seeds ready", async () => {
   const stored = [];
   const db = {

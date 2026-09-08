@@ -59,7 +59,7 @@ function checkpoints(db) {
     .map((operation) => operation.value);
 }
 
-test("sync commits prefetched blocks strictly in height order", async () => {
+test("sync commits a window in height order with one checkpoint", async () => {
   const mainDb = createBatchDb();
   const service = createService({
     mainDb,
@@ -77,10 +77,12 @@ test("sync commits prefetched blocks strictly in height order", async () => {
 
   await service.syncNewBlocks(50, 52, mainDb);
 
-  assert.deepEqual(checkpoints(mainDb).map((entry) => entry.lastBlock), [50, 51, 52]);
+  assert.deepEqual(checkpoints(mainDb).map((entry) => entry.lastBlock), [52]);
+  assert.equal(mainDb.written.filter((operation) => operation.type === "write" || operation.key === "scan_progress").length, 1);
+  assert.equal(service.lastProcessedBlock, 52);
 });
 
-test("a block failure stops the contiguous checkpoint", async () => {
+test("a block failure aborts the whole window without a checkpoint", async () => {
   const mainDb = createBatchDb();
   const service = createService({ mainDb });
   service.processBlock = async (block) => {
@@ -93,9 +95,9 @@ test("a block failure stops the contiguous checkpoint", async () => {
     /decode failed/
   );
 
-  assert.deepEqual(checkpoints(mainDb).map((entry) => entry.lastBlock), [10]);
-  assert.equal(service.lastProcessedBlock, 10);
-  assert.equal(service.syncStats.blocksProcessed, 1);
+  assert.deepEqual(checkpoints(mainDb), []);
+  assert.equal(service.lastProcessedBlock, null);
+  assert.equal(service.syncStats.blocksProcessed, 0);
 });
 
 test("failed atomic main commit cannot advance the checkpoint", async () => {
@@ -216,7 +218,52 @@ test("sync records stage timings and write amplification per block", async () =>
     endBlock: 30,
     blocks: 1,
     prefetchMs: 10,
+    commitMs: 30,
+    totalMs: 60,
+    blocksPerSecond: 16.667,
   });
+  assert.equal(service.getStatus().metrics.blocksPerSecond, 16.667);
+});
+
+test("sync prefetches the next contiguous window while processing this one", async () => {
+  const mainDb = createBatchDb();
+  const calls = [];
+  let resolveNext;
+  const nextWindow = new Promise((resolve) => {
+    resolveNext = resolve;
+  });
+  const service = createService({
+    mainDb,
+    bitcoinRPC: {
+      async getBlocksWindow(startBlock, endBlock) {
+        calls.push([startBlock, endBlock]);
+        if (startBlock === 10) {
+          return [
+            { height: 10, hash: "hash-10", block: { hash: "hash-10", tx: [] } },
+            { height: 11, hash: "hash-11", block: { hash: "hash-11", tx: [] } },
+          ];
+        }
+        return nextWindow;
+      },
+    },
+  });
+  service.currentHeight = 13;
+  service.processBlock = async () => {
+    assert.deepEqual(calls, [
+      [10, 11],
+      [12, 13],
+    ]);
+    return { created: [], spent: [], addresses: [] };
+  };
+
+  await service.syncNewBlocks(10, 11, mainDb);
+  resolveNext([
+    { height: 12, hash: "hash-12", block: { hash: "hash-12", tx: [] } },
+    { height: 13, hash: "hash-13", block: { hash: "hash-13", tx: [] } },
+  ]);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(service.prefetchedWindow?.range, { startBlock: 12, endBlock: 13 });
 });
 
 test("checkpoint persists block identity and live-utxo schema version", async () => {
@@ -320,4 +367,74 @@ test("equal or worse hops are not rewritten on replay", async () => {
 
   assert.deepEqual(mutations.addresses, []);
   assert.equal(mutations.created[0].outpoint, "tx-a:0");
+});
+
+test("same-window spends reuse live outpoints without a second database read", async () => {
+  const requested = [];
+  const stored = new Map([
+    [
+      "u:seed:0",
+      { d: 0, a: "seed", p: null, t: "seed", n: 50, o: "seed" },
+    ],
+  ]);
+  const mainDb = createBatchDb();
+  mainDb.getMany = async (keys) => {
+    requested.push([...keys]);
+    return keys.map((key) => stored.get(key));
+  };
+  const service = createService({
+    mainDb,
+    bitcoinRPC: {
+      getAddressFromScript(script) {
+        return script?.address || null;
+      },
+      async getBlocksWindow() {
+        return [
+          {
+            height: 40,
+            hash: "hash-40",
+            block: {
+              hash: "hash-40",
+              tx: [
+                {
+                  txid: "child-a",
+                  vin: [{ txid: "seed", vout: 0 }],
+                  vout: [{ value: 50, scriptPubKey: { address: "alice" } }],
+                },
+              ],
+            },
+          },
+          {
+            height: 41,
+            hash: "hash-41",
+            block: {
+              hash: "hash-41",
+              tx: [
+                {
+                  txid: "child-b",
+                  vin: [{ txid: "child-a", vout: 0 }],
+                  vout: [{ value: 50, scriptPubKey: { address: "bob" } }],
+                },
+              ],
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  await service.syncNewBlocks(40, 41, mainDb);
+
+  assert.deepEqual(requested[0], ["u:seed:0"]);
+  assert.equal(
+    requested.some((keys) => keys.includes("u:child-a:0")),
+    false
+  );
+  const writtenKeys = mainDb.written.map((operation) => [operation.type, operation.key]);
+  assert.deepEqual(writtenKeys[0], ["del", "u:seed:0"]);
+  assert.deepEqual(writtenKeys.at(-1), ["put", "scan_progress"]);
+  assert.deepEqual(
+    new Set(writtenKeys.slice(1, -1).map((entry) => entry.join(":"))),
+    new Set(["put:u:child-b:0", "put:a:alice", "put:a:bob"])
+  );
 });
