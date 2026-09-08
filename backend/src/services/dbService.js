@@ -79,21 +79,9 @@ class DatabaseService {
     }
   }
 
-  async getLastProcessedBlock(address) {
-    try {
-      return await this.db.get(`lastBlock:${address}`);
-    } catch (err) {
-      return 0;
-    }
-  }
-
-  async updateLastProcessedBlock(address, blockHeight) {
-    await this.db.put(`lastBlock:${address}`, blockHeight);
-  }
-
   async getTaintedInfo(address) {
     try {
-      return await this.db.get(`tainted:${address}`);
+      return await this.db.get(`a:${address}`);
     } catch (err) {
       if (err.code === "LEVEL_NOT_FOUND") {
         return null;
@@ -103,43 +91,17 @@ class DatabaseService {
   }
 
   async updateTaintedInfo(address, taintedInfo) {
-    await this.db.put(`tainted:${address}`, taintedInfo);
+    await this.db.put(`a:${address}`, taintedInfo);
   }
 
-  async getTransaction(txHash) {
+  async getLiveOutpoint(outpoint) {
     try {
-      return await this.db.get(`tx:${txHash}`);
+      return await this.db.get(`u:${outpoint}`);
     } catch (err) {
       if (err.code === "LEVEL_NOT_FOUND") {
         return null;
       }
       throw err;
-    }
-  }
-
-  async saveTransaction(txHash, txData) {
-    await this.db.put(`tx:${txHash}`, txData);
-  }
-
-  async saveQueueItem(degree, address, data) {
-    await this.db.put(`queue:${degree}:${address}`, data);
-  }
-
-  async getQueueIterator(degree) {
-    return this.db.iterator({
-      gt: `queue:${degree}:`,
-      lt: `queue:${degree}:\xff`,
-    });
-  }
-
-  async getDatabaseStatus() {
-    try {
-      return await this.db.get("db:status");
-    } catch (err) {
-      return {
-        lastUpdate: null,
-        isUpdating: false,
-      };
     }
   }
 }

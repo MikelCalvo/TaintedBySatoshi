@@ -19,17 +19,6 @@ function serviceForProcessing() {
       getAddressFromScript(script) {
         return script.address || null;
       },
-      formatTransaction(tx) {
-        return {
-          hash: tx.txid,
-          time: tx.time || 0,
-          inputs: [],
-          out: tx.vout.map((vout) => ({
-            addr: vout.scriptPubKey.address,
-            value: vout.value,
-          })),
-        };
-      },
     },
     dbService: {},
     logger: { info() {}, error() {} },
@@ -37,40 +26,42 @@ function serviceForProcessing() {
   });
 }
 
-function emptyMainDb() {
+function memoryDb(records = {}) {
+  const store = new Map(Object.entries(records));
+  const requested = [];
   return {
+    store,
+    requested,
     async getMany(keys) {
-      return keys.map(() => undefined);
+      requested.push([...keys]);
+      return keys.map((key) => store.get(key));
     },
-    async get() {
-      throw notFound();
+    async get(key) {
+      if (!store.has(key)) throw notFound();
+      return store.get(key);
     },
     batch() {
-      return { put() {}, async write() {} };
+      return { put() {}, del() {}, async write() {} };
     },
   };
 }
 
-test("block processing uses one multiget for unique external inputs", async () => {
-  const requested = [];
-  const scanDb = {
-    async getMany(keys) {
-      requested.push(keys);
-      return keys.map((key) => {
-        if (key === "tainted_out:parent:0") return 2;
-        return undefined;
-      });
+test("block processing uses one multiget for unique external live outpoints", async () => {
+  const db = memoryDb({
+    "u:parent:0": {
+      d: 2,
+      a: "parent-address",
+      p: "seed-address",
+      t: "parent",
+      n: 1,
+      o: "seed-address",
     },
-    async get() {
-      throw new Error("point reads should not be used for block inputs");
-    },
-  };
-  const mainDb = emptyMainDb();
+  });
   const service = serviceForProcessing();
-  service.mainDb = mainDb;
+  service.mainDb = db;
   service.resetBatch();
 
-  const operations = await service.processBlock(
+  const mutations = await service.processBlock(
     {
       tx: [
         {
@@ -80,514 +71,247 @@ test("block processing uses one multiget for unique external inputs", async () =
             { txid: "untainted", vout: 1 },
             { txid: "parent", vout: 0 },
           ],
-          vout: [
-            { value: 1, scriptPubKey: { address: "address-a" } },
-          ],
+          vout: [{ value: 1, scriptPubKey: { address: "address-a" } }],
         },
       ],
     },
-    mainDb,
-    scanDb
+    db
   );
 
-  assert.equal(requested.length, 1);
-  assert.deepEqual(requested[0], [
-    "tainted_out:parent:0",
-    "tainted_out:untainted:1",
-  ]);
-  assert.deepEqual(operations, [
-    {
-      key: "tainted_out:child-a:0",
-      value: { degree: 3, address: "address-a" },
-    },
-  ]);
+  assert.equal(db.requested.length, 2);
+  assert.deepEqual(db.requested[0], ["u:parent:0", "u:untainted:1"]);
+  assert.deepEqual(mutations.spent, ["parent:0"]);
+  assert.deepEqual(
+    mutations.created.map((entry) => entry.outpoint),
+    ["child-a:0"]
+  );
+  assert.equal(mutations.created[0].record.d, 3);
+  assert.equal(mutations.created[0].record.p, "parent-address");
+  assert.equal(mutations.addresses[0].address, "address-a");
 });
 
-test("source addresses are resolved from the same batch tx when prevout is absent", async () => {
-  const mainDb = emptyMainDb();
-  const scanDb = {
-    async getMany() {
-      return [];
+test("spent live outpoints are deleted instead of kept as history", async () => {
+  const db = memoryDb({
+    "u:parent:0": {
+      d: 0,
+      a: "seed-address",
+      p: null,
+      t: "parent",
+      n: 50,
+      o: "seed-address",
     },
-  };
-  const service = serviceForProcessing();
-  service.mainDb = mainDb;
-  service.resetBatch();
-  const calls = [];
-  service.processAddressInBatch = async (...args) => calls.push(args);
-  service.bitcoinRPC.formatTransaction = (tx) => ({
-    hash: tx.txid,
-    time: 1,
-    inputs: [],
-    out: (tx.vout || []).map((vout) => ({
-      addr: vout.scriptPubKey.address,
-      value: vout.value,
-    })),
   });
+  const service = serviceForProcessing();
+  service.mainDb = db;
+  service.resetBatch();
 
-  await service.processBlock(
+  const mutations = await service.processBlock(
     {
       tx: [
         {
-          txid: "seed-tx",
-          vin: [],
-          vout: [
-            { value: 50, scriptPubKey: { address: "seed-address" } },
-          ],
-        },
-        {
-          txid: "child-tx",
-          vin: [{ txid: "seed-tx", vout: 0 }],
-          vout: [
-            { value: 49, scriptPubKey: { address: "child-address" } },
-          ],
+          txid: "child",
+          vin: [{ txid: "parent", vout: 0 }],
+          vout: [{ value: 49, scriptPubKey: { address: "child-address" } }],
         },
       ],
     },
-    mainDb,
-    scanDb
+    db
   );
 
-  const childCall = calls.find((args) => args[0] === "child-address");
-  assert.equal(childCall[4], "seed-address");
-});
-
-test("external tainted outpoint provenance supplies the parent address", async () => {
-  const mainDb = emptyMainDb();
-  const scanDb = {
-    async getMany() {
-      return [{ degree: 4, address: "parent-address" }];
-    },
-  };
-  const service = serviceForProcessing();
-  service.mainDb = mainDb;
-  service.resetBatch();
-  const calls = [];
-  service.processAddressInBatch = async (...args) => calls.push(args);
-
-  await service.processBlock(
-    {
-      tx: [
-        {
-          txid: "child-tx",
-          vin: [{ txid: "parent-tx", vout: 1 }],
-          vout: [
-            { value: 10, scriptPubKey: { address: "child-address" } },
-          ],
-        },
-      ],
-    },
-    mainDb,
-    scanDb
+  assert.deepEqual(mutations.spent, ["parent:0"]);
+  assert.equal(
+    mutations.created.some((entry) => entry.outpoint === "parent:0"),
+    false
   );
-
-  assert.equal(calls[0][4], "parent-address");
 });
 
-test("new chronological outputs are written without existence point reads", async () => {
-  let getCalls = 0;
-  const scanDb = {
-    async getMany() {
-      return [];
-    },
-    async get() {
-      getCalls += 1;
-      throw new Error("output existence read is unnecessary");
-    },
-  };
-  const mainDb = emptyMainDb();
+test("same-block spends never persist the intermediate outpoint", async () => {
+  const db = memoryDb();
   const service = serviceForProcessing();
-  service.mainDb = mainDb;
+  service.mainDb = db;
   service.resetBatch();
 
-  const operations = await service.processBlock(
-    {
-      tx: [
-        {
-          txid: "seed-payment",
-          vin: [{ coinbase: "00" }],
-          vout: [
-            { value: 50, scriptPubKey: { address: "seed-address" } },
-          ],
-        },
-      ],
-    },
-    mainDb,
-    scanDb
-  );
-
-  assert.equal(getCalls, 0);
-  assert.deepEqual(operations, [
-    {
-      key: "tainted_out:seed-payment:0",
-      value: { degree: 0, address: "seed-address" },
-    },
-  ]);
-});
-
-test("same-block spends use newly created tainted outpoints without database reads", async () => {
-  const requested = [];
-  const scanDb = {
-    async getMany(keys) {
-      requested.push(keys);
-      return [];
-    },
-  };
-  const mainDb = emptyMainDb();
-  const service = serviceForProcessing();
-  service.mainDb = mainDb;
-  service.resetBatch();
-
-  const operations = await service.processBlock(
+  const mutations = await service.processBlock(
     {
       tx: [
         {
           txid: "parent",
           vin: [{ coinbase: "00" }],
-          vout: [
-            { value: 50, scriptPubKey: { address: "seed-address" } },
-          ],
+          vout: [{ value: 50, scriptPubKey: { address: "seed-address" } }],
         },
         {
           txid: "child",
           vin: [{ txid: "parent", vout: 0 }],
+          vout: [{ value: 49, scriptPubKey: { address: "address-b" } }],
+        },
+      ],
+    },
+    db
+  );
+
+  assert.deepEqual(mutations.spent, []);
+  assert.deepEqual(
+    mutations.created.map((entry) => entry.outpoint),
+    ["child:0"]
+  );
+  assert.equal(mutations.created[0].record.d, 1);
+});
+
+test("paying a seed does not taint sibling change", async () => {
+  const db = memoryDb();
+  const service = serviceForProcessing();
+  service.mainDb = db;
+  service.resetBatch();
+
+  const mutations = await service.processBlock(
+    {
+      tx: [
+        {
+          txid: "tribute",
+          vin: [{ txid: "clean", vout: 0 }],
           vout: [
-            { value: 49, scriptPubKey: { address: "address-b" } },
+            { value: 1, scriptPubKey: { address: "seed-address" } },
+            { value: 9, scriptPubKey: { address: "change-address" } },
           ],
         },
       ],
     },
-    mainDb,
-    scanDb
+    db
   );
 
-  assert.deepEqual(requested, []);
-  assert.deepEqual(operations, [
-    {
-      key: "tainted_out:parent:0",
-      value: { degree: 0, address: "seed-address" },
-    },
-    {
-      key: "tainted_out:child:0",
-      value: { degree: 1, address: "address-b" },
-    },
-  ]);
-});
-
-test("undefined values from LevelDB get are treated as missing", async () => {
-  const queued = [];
-  const mainDb = {
-    async get() {
-      return undefined;
-    },
-    batch() {
-      return {
-        put(key, value) {
-          queued.push({ key, value });
-        },
-        async write() {},
-      };
-    },
-  };
-  const service = serviceForProcessing();
-  service.mainDb = mainDb;
-  service.resetBatch();
-
-  await service.processAddressInBatch(
-    "address-a",
-    1,
-    { hash: "tx-a", time: 1, inputs: [], out: [{ addr: "address-a", value: 1 }] },
-    mainDb
+  assert.deepEqual(
+    mutations.created.map((entry) => entry.outpoint),
+    ["tribute:0"]
   );
-
-  assert.deepEqual(queued.map((entry) => entry.key), ["tainted:address-a"]);
-});
-
-test("new taint records store one parent edge instead of copying full paths", async () => {
-  const queued = [];
-  const mainDb = {
-    async get(key) {
-      if (key === "tainted:parent-address") {
-        return {
-          originalSatoshiAddress: "seed-address",
-          degree: 2,
-          path: [{ from: "seed-address", to: "parent-address" }],
-        };
-      }
-      return undefined;
-    },
-    batch() {
-      return {
-        put(key, value) {
-          queued.push({ key, value });
-        },
-        async write() {},
-      };
-    },
-  };
-  const service = serviceForProcessing();
-  service.mainDb = mainDb;
-  service.resetBatch();
-
-  await service.processAddressInBatch(
-    "child-address",
-    3,
-    {
-      hash: "child-tx",
-      time: 1,
-      inputs: [],
-      out: [{ addr: "child-address", value: 1 }],
-    },
-    mainDb,
-    "parent-address"
+  assert.deepEqual(
+    mutations.addresses.map((entry) => entry.address),
+    ["seed-address"]
   );
-
-  const child = queued.find((entry) => entry.key === "tainted:child-address").value;
-  assert.equal(child.originalSatoshiAddress, "seed-address");
-  assert.equal(child.parentAddress, "parent-address");
-  assert.deepEqual(child.edge, {
-    from: "parent-address",
-    to: "child-address",
-    txHash: "child-tx",
-    amount: 1,
-  });
-  assert.equal(child.path, undefined);
 });
 
-test("main record prefetch is skipped for untainted blocks", async () => {
-  let mainGetManyCalls = 0;
-  const mainDb = {
-    async getMany() {
-      mainGetManyCalls += 1;
-      return [];
-    },
-    batch() {
-      return { put() {}, async write() {} };
-    },
-  };
-  const scanDb = {
-    async getMany() {
-      return [];
-    },
-  };
+test("untainted blocks skip address reads completely", async () => {
+  const db = memoryDb();
   const service = serviceForProcessing();
-  service.mainDb = mainDb;
+  service.mainDb = db;
   service.resetBatch();
 
-  const operations = await service.processBlock(
+  const mutations = await service.processBlock(
     {
       tx: [
         {
           txid: "ordinary-tx",
           vin: [{ txid: "ordinary-parent", vout: 0 }],
-          vout: [
-            { value: 1, scriptPubKey: { address: "ordinary-address" } },
-          ],
+          vout: [{ value: 1, scriptPubKey: { address: "ordinary-address" } }],
         },
       ],
     },
-    mainDb,
-    scanDb
+    db
   );
 
-  assert.deepEqual(operations, []);
-  assert.equal(mainGetManyCalls, 0);
-});
-
-test("main prefetch reads only tainted outputs and their parents", async () => {
-  const requestedMainKeys = [];
-  const queued = [];
-  const mainDb = {
-    async getMany(keys) {
-      requestedMainKeys.push(keys);
-      return keys.map((key) =>
-        key === "tainted:parent-address"
-          ? { originalSatoshiAddress: "seed-address", degree: 2 }
-          : undefined
-      );
-    },
-    async get() {
-      throw new Error("targeted prefetch should avoid point reads");
-    },
-    batch() {
-      return {
-        put(key, value) {
-          queued.push({ key, value });
-        },
-        async write() {},
-      };
-    },
-  };
-  const scanDb = {
-    async getMany() {
-      return [{ degree: 2, address: "parent-address" }];
-    },
-  };
-  const service = serviceForProcessing();
-  service.mainDb = mainDb;
-  service.resetBatch();
-
-  await service.processBlock(
-    {
-      tx: [
-        {
-          txid: "tainted-child",
-          vin: [{ txid: "parent", vout: 0 }],
-          vout: [
-            { value: 1, scriptPubKey: { address: "tainted-output" } },
-          ],
-        },
-        {
-          txid: "ordinary-child",
-          vin: [{ txid: "ordinary-parent", vout: 0 }],
-          vout: [
-            { value: 1, scriptPubKey: { address: "ordinary-output" } },
-          ],
-        },
-      ],
-    },
-    mainDb,
-    scanDb
-  );
-
-  assert.deepEqual(requestedMainKeys, [
-    [
-      "tainted:parent-address",
-      "tainted:tainted-output",
-    ],
-  ]);
-  assert.equal(
-    queued.some((operation) => operation.key === "tainted:ordinary-output"),
-    false
-  );
-});
-
-test("same-block parent records are resolved from the shared main cache", async () => {
-  let pointReads = 0;
-  const mainDb = {
-    async getMany(keys) {
-      return keys.map(() => undefined);
-    },
-    async get() {
-      pointReads++;
-      throw new Error("same-block parents should already be cached");
-    },
-    batch() {
-      return { put() {}, async write() {} };
-    },
-  };
-  const scanDb = {
-    async getMany() {
-      return [];
-    },
-  };
-  const service = serviceForProcessing();
-  service.mainDb = mainDb;
-  service.resetBatch();
-
-  const operations = await service.processBlock(
-    {
-      tx: [
-        {
-          txid: "seed-tx",
-          vin: [{ coinbase: "00" }],
-          vout: [
-            { value: 50, scriptPubKey: { address: "seed-address" } },
-          ],
-        },
-        {
-          txid: "child-tx",
-          vin: [{ txid: "seed-tx", vout: 0 }],
-          vout: [
-            { value: 49, scriptPubKey: { address: "child-address" } },
-          ],
-        },
-      ],
-    },
-    mainDb,
-    scanDb
-  );
-
-  assert.equal(pointReads, 0);
-  assert.equal(operations.length, 2);
-});
-
-test("block processing records NAS lookup stages and parent point reads", async () => {
-  let now = 0;
-  const mainDb = {
-    async getMany(keys) {
-      now += 11;
-      return keys.map(() => undefined);
-    },
-    async get(key) {
-      assert.equal(key, "tainted:parent-address");
-      now += 13;
-      return { originalSatoshiAddress: "seed-address", degree: 2 };
-    },
-    batch() {
-      return { put() {}, async write() {} };
-    },
-  };
-  const scanDb = {
-    async getMany() {
-      now += 7;
-      return [{ degree: 2, address: "parent-address" }];
-    },
-  };
-  const service = serviceForProcessing();
-  service.now = () => now;
-  service.mainDb = mainDb;
-  service.resetBatch();
-  service.activeBlockMetrics = {
-    inputLookupMs: 0,
-    mainPrefetchMs: 0,
-    parentLookupMs: 0,
-    parentPointReads: 0,
-    externalOutpoints: 0,
-    mainPrefetchKeys: 0,
-    taintedTransactions: 0,
-    taintedOutputs: 0,
-    addressWrites: 0,
-  };
-
-  await service.processBlock(
-    {
-      tx: [
-        {
-          txid: "child",
-          vin: [{ txid: "parent", vout: 0 }],
-          vout: [
-            { value: 1, scriptPubKey: { address: "child-address" } },
-          ],
-        },
-      ],
-    },
-    mainDb,
-    scanDb
-  );
-
-  assert.deepEqual(service.activeBlockMetrics, {
-    inputLookupMs: 7,
-    mainPrefetchMs: 11,
-    parentLookupMs: 13,
-    parentPointReads: 1,
-    externalOutpoints: 1,
-    mainPrefetchKeys: 2,
-    taintedTransactions: 1,
-    taintedOutputs: 1,
-    addressWrites: 1,
+  assert.deepEqual(mutations, {
+    created: [],
+    spent: [],
+    addresses: [],
+    newWallets: 0,
   });
+  assert.deepEqual(db.requested, [["u:ordinary-parent:0"]]);
+});
+
+test("first-seen wallets count as new while hop updates do not", async () => {
+  const db = memoryDb({
+    "u:parent:0": {
+      d: 0,
+      a: "seed-address",
+      p: null,
+      t: "parent",
+      n: 50,
+      o: "seed-address",
+    },
+    "a:alice": {
+      d: 4,
+      p: "old",
+      t: "old-tx",
+      n: 1,
+      o: "seed-address",
+    },
+  });
+  const service = serviceForProcessing();
+  service.mainDb = db;
+  service.resetBatch();
+
+  const mutations = await service.processBlock(
+    {
+      tx: [
+        {
+          txid: "spread",
+          vin: [{ txid: "parent", vout: 0 }],
+          vout: [
+            { value: 1, scriptPubKey: { address: "alice" } },
+            { value: 1, scriptPubKey: { address: "bob" } },
+          ],
+        },
+      ],
+    },
+    db
+  );
+
+  assert.equal(mutations.newWallets, 1);
+  assert.deepEqual(
+    mutations.addresses.map((entry) => entry.address).sort(),
+    ["alice", "bob"]
+  );
+});
+
+test("shorter address hops replace longer ones and equal hops are skipped", async () => {
+  const db = memoryDb({
+    "u:parent:0": {
+      d: 1,
+      a: "parent-address",
+      p: "seed-address",
+      t: "parent",
+      n: 1,
+      o: "seed-address",
+    },
+    "a:child-address": {
+      d: 4,
+      p: "old",
+      t: "old-tx",
+      n: 1,
+      o: "seed-address",
+    },
+  });
+  const service = serviceForProcessing();
+  service.mainDb = db;
+  service.resetBatch();
+
+  const mutations = await service.processBlock(
+    {
+      tx: [
+        {
+          txid: "better",
+          vin: [{ txid: "parent", vout: 0 }],
+          vout: [{ value: 1, scriptPubKey: { address: "child-address" } }],
+        },
+      ],
+    },
+    db
+  );
+
+  assert.equal(mutations.addresses[0].record.d, 2);
+  assert.equal(mutations.addresses[0].record.p, "parent-address");
 });
 
 test("database I/O errors are not treated as untainted misses", async () => {
-  const scanDb = {
+  const db = {
     async getMany() {
       throw new Error("NAS unavailable");
     },
+    batch() {
+      return { put() {}, del() {}, async write() {} };
+    },
   };
-  const mainDb = emptyMainDb();
   const service = serviceForProcessing();
-  service.mainDb = mainDb;
+  service.mainDb = db;
   service.resetBatch();
 
   await assert.rejects(
@@ -598,14 +322,11 @@ test("database I/O errors are not treated as untainted misses", async () => {
             {
               txid: "child",
               vin: [{ txid: "parent", vout: 0 }],
-              vout: [
-                { value: 1, scriptPubKey: { address: "address-a" } },
-              ],
+              vout: [{ value: 1, scriptPubKey: { address: "address-a" } }],
             },
           ],
         },
-        mainDb,
-        scanDb
+        db
       ),
     /NAS unavailable/
   );

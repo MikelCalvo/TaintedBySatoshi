@@ -7,140 +7,105 @@ const {
   BackgroundSyncService,
 } = require("../src/services/backgroundSyncService");
 
-function createService() {
-  const service = new BackgroundSyncService({
-    bitcoinRPC: {},
+function serviceForProcessing() {
+  return new BackgroundSyncService({
+    bitcoinRPC: {
+      getAddressFromScript(script) {
+        return script.address || null;
+      },
+    },
     dbService: {},
     logger: { info() {}, error() {} },
-    satoshiAddresses: ["seed"],
+    satoshiAddresses: ["seed-address"],
   });
-  service.mainDb = {
-    batch() {
-      return { put() {}, async write() {} };
-    },
-  };
-  service.resetBatch();
-  return service;
 }
 
-test("main prefetch reads only address records", async () => {
-  const calls = [];
+test("address prefetch reads only compact wallet records", async () => {
+  const requested = [];
   const db = {
     async getMany(keys) {
-      calls.push(keys);
-      return keys.map(() => undefined);
-    },
-  };
-  const service = createService();
-
-  const cache = await service.prefetchMainRecords(
-    db,
-    ["address-a", "address-b"],
-    ["tx-a", "tx-b"]
-  );
-
-  assert.deepEqual(calls, [
-    ["tainted:address-a", "tainted:address-b"],
-  ]);
-  assert.equal(cache.size, 2);
-});
-
-test("block-local address and transaction caches avoid repeated NAS reads", async () => {
-  let getManyCalls = 0;
-  let pointGets = 0;
-  const db = {
-    async getMany(keys) {
-      getManyCalls += 1;
+      requested.push(keys);
       return keys.map((key) =>
-        key === "tainted:existing-address" ? { degree: 1 } : undefined
+        key === "u:parent:0"
+          ? { d: 1, a: "parent-address", p: "seed-address", t: "parent", n: 1, o: "seed-address" }
+          : key === "a:child-address"
+            ? { d: 9, p: "old", t: "old", n: 1, o: "seed-address" }
+            : undefined
       );
     },
-    async get() {
-      pointGets += 1;
-      return undefined;
-    },
     batch() {
-      return { put() {}, async write() {} };
+      return { put() {}, del() {}, async write() {} };
     },
   };
-  const service = createService();
+  const service = serviceForProcessing();
   service.mainDb = db;
   service.resetBatch();
-  const cache = await service.prefetchMainRecords(
-    db,
-    ["existing-address", "new-address"],
-    ["tx-a"]
+
+  const mutations = await service.processBlock(
+    {
+      tx: [
+        {
+          txid: "child",
+          vin: [{ txid: "parent", vout: 0 }],
+          vout: [{ value: 1, scriptPubKey: { address: "child-address" } }],
+        },
+      ],
+    },
+    db
   );
 
-  await service.processAddressInBatch(
-    "existing-address",
-    2,
-    { hash: "tx-a", time: 1, inputs: [], out: [] },
-    db,
-    null,
-    cache
-  );
-  await service.processAddressInBatch(
-    "new-address",
-    2,
-    { hash: "tx-a", time: 1, inputs: [], out: [] },
-    db,
-    null,
-    cache
-  );
-
-  assert.equal(getManyCalls, 1);
-  assert.equal(pointGets, 0);
+  assert.deepEqual(requested[0], ["u:parent:0"]);
+  assert.deepEqual(requested[1], ["a:child-address"]);
+  assert.equal(mutations.addresses[0].record.d, 2);
 });
 
-test("address witness writes do not persist redundant transaction payloads", async () => {
+test("address witness writes never persist transaction payloads", async () => {
   const queued = [];
   const db = {
     async getMany(keys) {
-      return keys.map(() => undefined);
-    },
-    async get() {
-      throw new Error("transaction existence must not use a point read");
+      return keys.map((key) =>
+        key === "u:parent:0"
+          ? { d: 0, a: "seed-address", p: null, t: "parent", n: 50, o: "seed-address" }
+          : undefined
+      );
     },
     batch() {
       return {
-        put(key) {
-          queued.push(key);
+        put(key, value) {
+          queued.push({ key, value });
         },
+        del() {},
         async write() {},
       };
     },
   };
-  const service = createService();
+  const service = serviceForProcessing();
   service.mainDb = db;
   service.resetBatch();
-  const cache = await service.prefetchMainRecords(
-    db,
-    ["address-a", "address-b"],
-    ["tx-a"]
-  );
-  const transaction = { hash: "tx-a", time: 1, inputs: [], out: [] };
 
-  await service.processAddressInBatch(
-    "address-a",
-    2,
-    transaction,
-    db,
-    null,
-    cache
-  );
-  await service.processAddressInBatch(
-    "address-b",
-    2,
-    transaction,
-    db,
-    null,
-    cache
+  const mutations = await service.processBlock(
+    {
+      tx: [
+        {
+          txid: "child",
+          vin: [{ txid: "parent", vout: 0 }],
+          vout: [
+            { value: 1, scriptPubKey: { address: "alice" } },
+            { value: 1, scriptPubKey: { address: "bob" } },
+          ],
+        },
+      ],
+    },
+    db
   );
 
-  assert.equal(queued.filter((key) => key === "tx:tx-a").length, 0);
-  assert.deepEqual(queued.filter((key) => key.startsWith("tainted:")), [
-    "tainted:address-a",
-    "tainted:address-b",
-  ]);
+  assert.equal(queued.length, 0);
+  assert.equal(
+    mutations.created.some((entry) => entry.outpoint.startsWith("tx:")),
+    false
+  );
+  assert.deepEqual(
+    mutations.addresses.map((entry) => entry.address),
+    ["alice", "bob"]
+  );
 });

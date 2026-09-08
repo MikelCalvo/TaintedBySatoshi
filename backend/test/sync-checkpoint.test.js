@@ -11,6 +11,9 @@ function createService(overrides = {}) {
   return new BackgroundSyncService({
     bitcoinRPC: {
       async initialize() {},
+      getAddressFromScript(script) {
+        return script?.address || null;
+      },
       async call(method, params) {
         if (method === "getblockhash") return `hash-${params[0]}`;
         if (method === "getblock") return { hash: params[0], tx: [] };
@@ -28,7 +31,7 @@ function createService(overrides = {}) {
   });
 }
 
-function createBatchDb({ failWrite = false, order = [] } = {}) {
+function createBatchDb({ failWrite = false } = {}) {
   const written = [];
   return {
     written,
@@ -38,8 +41,10 @@ function createBatchDb({ failWrite = false, order = [] } = {}) {
         put(key, value) {
           operations.push({ type: "put", key, value });
         },
+        del(key) {
+          operations.push({ type: "del", key });
+        },
         async write() {
-          order.push("main");
           if (failWrite) throw new Error("main batch failed");
           written.push(...operations);
         },
@@ -48,35 +53,14 @@ function createBatchDb({ failWrite = false, order = [] } = {}) {
   };
 }
 
-function createScanDb({ failWrite = false, order = [] } = {}) {
-  const written = [];
-  return {
-    written,
-    batch() {
-      const operations = [];
-      return {
-        put(key, value) {
-          operations.push({ type: "put", key, value });
-        },
-        async write() {
-          order.push("scan");
-          if (failWrite) throw new Error("scan batch failed");
-          written.push(...operations);
-        },
-      };
-    },
-  };
-}
-
-function checkpoints(scanDb) {
-  return scanDb.written
+function checkpoints(db) {
+  return db.written
     .filter((operation) => operation.key === "scan_progress")
     .map((operation) => operation.value);
 }
 
 test("sync commits prefetched blocks strictly in height order", async () => {
   const mainDb = createBatchDb();
-  const scanDb = createScanDb();
   const service = createService({
     mainDb,
     bitcoinRPC: {
@@ -89,24 +73,23 @@ test("sync commits prefetched blocks strictly in height order", async () => {
       },
     },
   });
-  service.processBlock = async () => [];
+  service.processBlock = async () => ({ created: [], spent: [], addresses: [] });
 
-  await service.syncNewBlocks(50, 52, scanDb);
+  await service.syncNewBlocks(50, 52, mainDb);
 
   assert.deepEqual(checkpoints(mainDb).map((entry) => entry.lastBlock), [50, 51, 52]);
 });
 
 test("a block failure stops the contiguous checkpoint", async () => {
   const mainDb = createBatchDb();
-  const scanDb = createScanDb();
   const service = createService({ mainDb });
   service.processBlock = async (block) => {
     if (block.hash === "hash-11") throw new Error("decode failed");
-    return [];
+    return { created: [], spent: [], addresses: [] };
   };
 
   await assert.rejects(
-    () => service.syncNewBlocks(10, 12, scanDb),
+    () => service.syncNewBlocks(10, 12, mainDb),
     /decode failed/
   );
 
@@ -116,39 +99,52 @@ test("a block failure stops the contiguous checkpoint", async () => {
 });
 
 test("failed atomic main commit cannot advance the checkpoint", async () => {
-  const order = [];
-  const mainDb = createBatchDb({ failWrite: true, order });
-  const scanDb = createScanDb({ order });
+  const mainDb = createBatchDb({ failWrite: true });
   const service = createService({ mainDb });
-  service.processBlock = async () => {
-    service.safeBatchPut("tainted:test", { degree: 1 });
-    return [{ key: "tainted_out:test:0", value: 1 }];
-  };
+  service.processBlock = async () => ({
+    created: [
+      {
+        outpoint: "child:0",
+        record: { d: 1, a: "alice", p: "seed", t: "child", n: 1, o: "seed" },
+      },
+    ],
+    spent: ["parent:0"],
+    addresses: [{ address: "alice", record: { d: 1, p: "seed", t: "child", n: 1, o: "seed" } }],
+  });
 
   await assert.rejects(
-    () => service.syncNewBlocks(20, 20, scanDb),
+    () => service.syncNewBlocks(20, 20, mainDb),
     /main batch failed/
   );
 
-  assert.deepEqual(order, ["main"]);
-  assert.deepEqual(checkpoints(scanDb), []);
   assert.deepEqual(mainDb.written, []);
   assert.equal(service.lastProcessedBlock, null);
 });
 
-test("main mutations, scan state and checkpoint share one database commit", async () => {
+test("live utxos, spent deletes, wallets and checkpoint share one commit", async () => {
   const mainDb = createBatchDb();
   const service = createService({ mainDb });
-  service.processBlock = async () => {
-    service.safeBatchPut("tainted:test", { degree: 1 });
-    return [{ key: "tainted_out:test:0", value: 1 }];
-  };
+  service.processBlock = async () => ({
+    created: [
+      {
+        outpoint: "child:0",
+        record: { d: 1, a: "alice", p: "seed", t: "child", n: 1, o: "seed" },
+      },
+    ],
+    spent: ["parent:0"],
+    addresses: [{ address: "alice", record: { d: 1, p: "seed", t: "child", n: 1, o: "seed" } }],
+  });
 
   await service.syncNewBlocks(30, 30, mainDb);
 
   assert.deepEqual(
-    mainDb.written.map((operation) => operation.key),
-    ["tainted:test", "tainted_out:test:0", "scan_progress"]
+    mainDb.written.map((operation) => [operation.type, operation.key]),
+    [
+      ["del", "u:parent:0"],
+      ["put", "u:child:0"],
+      ["put", "a:alice"],
+      ["put", "scan_progress"],
+    ]
   );
 });
 
@@ -176,13 +172,22 @@ test("sync records stage timings and write amplification per block", async () =>
   service.processBlock = async () => {
     now += 20;
     service.activeBlockMetrics.inputLookupMs = 4;
-    service.activeBlockMetrics.mainPrefetchMs = 6;
+    service.activeBlockMetrics.addressPrefetchMs = 6;
     service.activeBlockMetrics.externalOutpoints = 8;
-    service.activeBlockMetrics.mainPrefetchKeys = 12;
-    service.activeBlockMetrics.taintedTransactions = 2;
+    service.activeBlockMetrics.addressPrefetchKeys = 12;
     service.activeBlockMetrics.taintedOutputs = 3;
+    service.activeBlockMetrics.spentOutpoints = 2;
     service.activeBlockMetrics.addressWrites = 2;
-    return [{ key: "tainted_out:test:0", value: 1 }];
+    return {
+      created: [
+        {
+          outpoint: "child:0",
+          record: { d: 1, a: "alice", p: "seed", t: "child", n: 1, o: "seed" },
+        },
+      ],
+      spent: ["parent:0"],
+      addresses: [{ address: "alice", record: { d: 1, p: "seed", t: "child", n: 1, o: "seed" } }],
+    };
   };
   service.flushBatch = async () => {
     now += 30;
@@ -196,17 +201,15 @@ test("sync records stage timings and write amplification per block", async () =>
     height: 30,
     totalMs: 50,
     inputLookupMs: 4,
-    mainPrefetchMs: 6,
-    parentLookupMs: 0,
-    parentPointReads: 0,
+    addressPrefetchMs: 6,
     processingMs: 20,
     commitMs: 30,
     externalOutpoints: 8,
-    mainPrefetchKeys: 12,
-    taintedTransactions: 2,
+    addressPrefetchKeys: 12,
     taintedOutputs: 3,
+    spentOutpoints: 2,
     addressWrites: 2,
-    batchOperations: 2,
+    batchOperations: 4,
   });
   assert.deepEqual(service.getStatus().metrics.pipeline.window, {
     startBlock: 30,
@@ -216,21 +219,22 @@ test("sync records stage timings and write amplification per block", async () =>
   });
 });
 
-test("checkpoint persists block identity and schema version", async () => {
+test("checkpoint persists block identity and live-utxo schema version", async () => {
   const mainDb = createBatchDb();
-  const scanDb = createScanDb();
   const service = createService({ mainDb });
-  service.processBlock = async () => [];
+  service.processBlock = async () => ({ created: [], spent: [], addresses: [] });
 
-  await service.syncNewBlocks(30, 30, scanDb);
+  await service.syncNewBlocks(30, 30, mainDb);
 
   const saved = checkpoints(mainDb);
   assert.equal(saved.length, 1);
   assert.deepEqual(saved[0], {
     lastBlock: 30,
     blockHash: "hash-30",
-    schemaVersion: 3,
+    schemaVersion: 4,
     lastUpdated: saved[0].lastUpdated,
+    liveOutpoints: 0,
+    taintedWallets: 0,
   });
   assert.equal(typeof saved[0].lastUpdated, "number");
   assert.equal(service.lastProcessedBlock, 30);
@@ -253,28 +257,46 @@ test("a stored checkpoint hash mismatch stops before processing", async () => {
       service.verifyCheckpoint({
         lastBlock: 30,
         blockHash: "old-hash-30",
+        schemaVersion: 4,
       }),
     /checkpoint hash mismatch/i
   );
 });
 
-test("replaying a block after scan commit failure does not overwrite a shorter path", async () => {
+test("incompatible historical schemas refuse to resume", async () => {
+  const service = createService({ mainDb: createBatchDb() });
+
+  await assert.rejects(
+    () =>
+      service.verifyCheckpoint({
+        lastBlock: 30,
+        blockHash: "hash-30",
+        schemaVersion: 3,
+      }),
+    /incompatible database schema/i
+  );
+});
+
+test("equal or worse hops are not rewritten on replay", async () => {
   const stored = new Map([
-    ["tainted:address-a", { degree: 1 }],
-    ["tx:tx-a", { hash: "tx-a" }],
+    [
+      "u:parent:0",
+      { d: 0, a: "seed", p: null, t: "parent", n: 50, o: "seed" },
+    ],
+    ["a:address-a", { d: 1, p: "seed", t: "tx-a", n: 1, o: "seed" }],
   ]);
   const mainDb = {
     async get(key) {
       if (stored.has(key)) return stored.get(key);
-      const error = new Error("not found");
-      error.code = "LEVEL_NOT_FOUND";
-      throw error;
+      throw Object.assign(new Error("not found"), { code: "LEVEL_NOT_FOUND" });
+    },
+    async getMany(keys) {
+      return keys.map((key) => stored.get(key));
     },
     batch() {
       return {
-        put() {
-          throw new Error("replay should not enqueue writes");
-        },
+        put() {},
+        del() {},
         async write() {},
       };
     },
@@ -283,12 +305,19 @@ test("replaying a block after scan commit failure does not overwrite a shorter p
   service.mainDb = mainDb;
   service.resetBatch();
 
-  await service.processAddressInBatch(
-    "address-a",
-    1,
-    { hash: "tx-a", time: 1, inputs: [], out: [] },
+  const mutations = await service.processBlock(
+    {
+      tx: [
+        {
+          txid: "tx-a",
+          vin: [{ txid: "parent", vout: 0 }],
+          vout: [{ value: 1, scriptPubKey: { address: "address-a" } }],
+        },
+      ],
+    },
     mainDb
   );
 
-  assert.equal(service.batchCount, 0);
+  assert.deepEqual(mutations.addresses, []);
+  assert.equal(mutations.created[0].outpoint, "tx-a:0");
 });

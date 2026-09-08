@@ -66,14 +66,13 @@ test("block stage metrics expose timings, I/O volume and slow-block context", ()
     height: 90,
     totalMs: 1200,
     inputLookupMs: 100,
-    mainPrefetchMs: 300,
-    parentLookupMs: 50,
+    addressPrefetchMs: 300,
     processingMs: 500,
     commitMs: 300,
     externalOutpoints: 40,
-    mainPrefetchKeys: 80,
-    taintedTransactions: 5,
+    addressPrefetchKeys: 80,
     taintedOutputs: 12,
+    spentOutpoints: 7,
     addressWrites: 9,
     batchOperations: 27,
   });
@@ -81,14 +80,13 @@ test("block stage metrics expose timings, I/O volume and slow-block context", ()
     height: 91,
     totalMs: 2400,
     inputLookupMs: 200,
-    mainPrefetchMs: 700,
-    parentLookupMs: 150,
+    addressPrefetchMs: 700,
     processingMs: 900,
     commitMs: 600,
     externalOutpoints: 50,
-    mainPrefetchKeys: 100,
-    taintedTransactions: 8,
+    addressPrefetchKeys: 100,
     taintedOutputs: 20,
+    spentOutpoints: 11,
     addressWrites: 14,
     batchOperations: 43,
   });
@@ -98,8 +96,7 @@ test("block stage metrics expose timings, I/O volume and slow-block context", ()
   assert.deepEqual(pipeline.averageMs, {
     total: 1800,
     inputLookup: 150,
-    mainPrefetch: 500,
-    parentLookup: 100,
+    addressPrefetch: 500,
     processing: 700,
     commit: 450,
   });
@@ -109,19 +106,22 @@ test("block stage metrics expose timings, I/O volume and slow-block context", ()
   assert.equal(pipeline.slowest.totalMs, 2400);
 });
 
+test("status reports live utxo and tainted wallet counts", () => {
+  const sync = service();
+  sync.taintStats = { liveOutpoints: 12, taintedWallets: 8, byDegree: { 1: 8 } };
+  const status = sync.getStatus();
+  assert.equal(status.stats.liveOutpoints, 12);
+  assert.equal(status.stats.taintedWallets, 8);
+});
+
 test("stop waits for an active sync and closes the shared database", async () => {
   let finishSync;
   const active = new Promise((resolve) => {
     finishSync = resolve;
   });
   let mainClosed = false;
-  let scanClosed = false;
   const sync = new BackgroundSyncService({
-    bitcoinRPC: {
-      async closeDatabase() {
-        scanClosed = true;
-      },
-    },
+    bitcoinRPC: {},
     dbService: {
       async close() {
         mainClosed = true;
@@ -143,6 +143,5 @@ test("stop waits for an active sync and closes the shared database", async () =>
   finishSync();
   await stopping;
   assert.equal(mainClosed, true);
-  assert.equal(scanClosed, false);
   assert.equal(sync.phase, "stopped");
 });
