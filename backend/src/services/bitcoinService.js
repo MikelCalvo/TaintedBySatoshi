@@ -79,33 +79,15 @@ async function checkAddressConnection(address) {
 
     const connectionPath = await buildConnectionPath(db, address, taintedInfo);
 
-    // Get cached transaction details with timeout
-    const transactions = await Promise.all(
-      connectionPath.map(async (p) => {
-        try {
-          const tx = await Promise.race([
-            db.get(`tx:${p.txHash}`).catch(() => null),
-            new Promise((_, reject) =>
-              setTimeout(
-                () => reject(new Error("Transaction fetch timeout")),
-                5000
-              )
-            ),
-          ]);
-          return tx || { hash: p.txHash, amount: p.amount };
-        } catch (err) {
-          logger.warn(`Failed to fetch transaction ${p.txHash}:`, err.message);
-          return { hash: p.txHash, amount: p.amount };
-        }
-      })
-    );
-
     return {
       isConnected: true,
       isSatoshiAddress: false,
       degree: taintedInfo.degree,
       connectionPath,
-      transactions,
+      transactions: connectionPath.map((edge) => ({
+        hash: edge.txHash,
+        amount: edge.amount,
+      })),
     };
   } catch (error) {
     logger.error("Database error:", error);

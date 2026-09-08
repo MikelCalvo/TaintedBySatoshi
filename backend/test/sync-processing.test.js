@@ -300,7 +300,7 @@ test("undefined values from LevelDB get are treated as missing", async () => {
     mainDb
   );
 
-  assert.deepEqual(queued.map((entry) => entry.key), ["tx:tx-a", "tainted:address-a"]);
+  assert.deepEqual(queued.map((entry) => entry.key), ["tainted:address-a"]);
 });
 
 test("new taint records store one parent edge instead of copying full paths", async () => {

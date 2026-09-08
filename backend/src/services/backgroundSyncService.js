@@ -875,25 +875,6 @@ class BackgroundSyncService {
       originalSatoshiAddress = address;
     }
 
-    const txKey = `tx:${transaction.hash}`;
-    let transactionExists = mainRecords?.has(txKey) || false;
-    if (!mainRecords) {
-      try {
-        transactionExists = Boolean(await db.get(txKey));
-      } catch (err) {
-        if (err.code !== "LEVEL_NOT_FOUND") throw err;
-      }
-    }
-    if (!transactionExists && !this.safeBatchPut(txKey, {
-      hash: transaction.hash,
-      time: transaction.time,
-      inputs: transaction.inputs,
-      outputs: transaction.out,
-      degree: currentDegree,
-    })) {
-      throw new Error("Main database batch is not writable");
-    }
-
     const amount =
       transaction.out.find((candidate) => candidate.addr === address)?.value || 0;
     const taintData = {
@@ -921,7 +902,6 @@ class BackgroundSyncService {
     }
     if (mainRecords) {
       mainRecords.set(addressKey, taintData);
-      mainRecords.set(txKey, transaction);
     }
     this.syncStats.addressesUpdated++;
 

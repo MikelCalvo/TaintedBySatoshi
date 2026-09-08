@@ -93,7 +93,7 @@ test("block-local address and transaction caches avoid repeated NAS reads", asyn
   assert.equal(pointGets, 0);
 });
 
-test("transaction writes are deduplicated in the block cache without NAS reads", async () => {
+test("address witness writes do not persist redundant transaction payloads", async () => {
   const queued = [];
   const db = {
     async getMany(keys) {
@@ -138,5 +138,9 @@ test("transaction writes are deduplicated in the block cache without NAS reads",
     cache
   );
 
-  assert.equal(queued.filter((key) => key === "tx:tx-a").length, 1);
+  assert.equal(queued.filter((key) => key === "tx:tx-a").length, 0);
+  assert.deepEqual(queued.filter((key) => key.startsWith("tainted:")), [
+    "tainted:address-a",
+    "tainted:address-b",
+  ]);
 });
