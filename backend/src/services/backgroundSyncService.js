@@ -3,6 +3,7 @@ const bitcoinRPC = require("./bitcoinRPC");
 const logger = require("../utils/logger");
 const path = require("path");
 const fs = require("fs");
+const { walletHopIndexKey } = require("./walletIndexKeys");
 const {
   processBlockTaint,
   mergeAddressRecord,
@@ -166,6 +167,7 @@ class BackgroundSyncService {
     }
 
     this.starting = (async () => {
+      this.stopping = null;
       this.isRunning = true;
       this.phase = "initializing";
       this.logger.info("Background sync service initializing...");
@@ -211,6 +213,7 @@ class BackgroundSyncService {
     const batch = scanDb.batch();
     for (const address of SATOSHI_ADDRESSES) {
       batch.put(`a:${address}`, this.seedRecord(address));
+      batch.put(walletHopIndexKey(address, 0), 1);
     }
     batch.put("seeds_initialized", {
       count: SATOSHI_ADDRESSES.length,
@@ -253,6 +256,7 @@ class BackgroundSyncService {
     for (let index = 0; index < SATOSHI_ADDRESSES.length; index++) {
       if (existing[index]) continue;
       batch.put(`a:${SATOSHI_ADDRESSES[index]}`, this.seedRecord(SATOSHI_ADDRESSES[index]));
+      batch.put(walletHopIndexKey(SATOSHI_ADDRESSES[index], 0), 1);
       missing += 1;
     }
 
@@ -293,6 +297,10 @@ class BackgroundSyncService {
       } catch (err) {
         this.logger.error("Error in sync loop:", err.message);
         this.syncStats.errors++;
+      }
+
+      if (!this.isRunning) {
+        return;
       }
 
       let nextInterval;
@@ -362,29 +370,36 @@ class BackgroundSyncService {
     }
   }
 
-  async stop() {
-    if (!this.isRunning) {
-      return;
-    }
-
+  requestStop() {
     this.isRunning = false;
     if (this.syncInterval) {
       clearTimeout(this.syncInterval);
       this.syncInterval = null;
     }
+  }
 
-    if (this.activeSync) {
-      await this.activeSync;
+  async stop() {
+    this.requestStop();
+    if (this.stopping) {
+      return this.stopping;
     }
 
-    await this.flushBatch();
-    await this.dbService.close?.();
-    this.batchIsValid = false;
-    this.mainDb = null;
-    this.dbReady = false;
-    this.phase = "stopped";
+    this.stopping = (async () => {
+      if (this.activeSync) {
+        await this.activeSync;
+      }
 
-    this.logger.info("Background sync service stopped");
+      await this.flushBatch();
+      await this.dbService.close?.();
+      this.batchIsValid = false;
+      this.mainDb = null;
+      this.dbReady = false;
+      this.phase = "stopped";
+
+      this.logger.info("Background sync service stopped");
+    })();
+
+    return this.stopping;
   }
 
   async checkAndSync() {
@@ -596,7 +611,11 @@ class BackgroundSyncService {
             record
           );
         }
-        for (const { address, record } of mutations.addresses || []) {
+        for (const { address, record, previousHops } of mutations.addresses || []) {
+          if (Number.isSafeInteger(previousHops) && previousHops !== record.d) {
+            this.applyWindowMutation(windowPuts, windowDels, "del", walletHopIndexKey(address, previousHops));
+          }
+          this.applyWindowMutation(windowPuts, windowDels, "put", walletHopIndexKey(address, record.d), 1);
           this.applyWindowMutation(
             windowPuts,
             windowDels,
@@ -927,7 +946,11 @@ class BackgroundSyncService {
       if (!existing) newWallets += 1;
       this.windowAddressRecords?.set(entry.address, merged);
       this.rememberAddress(entry.address, merged);
-      writableAddresses.push({ address: entry.address, record: merged });
+      writableAddresses.push({
+        address: entry.address,
+        record: merged,
+        previousHops: existing?.d ?? null,
+      });
     }
     if (this.activeBlockMetrics) {
       this.activeBlockMetrics.addressWrites = writableAddresses.length;
@@ -989,7 +1012,11 @@ class BackgroundSyncService {
   async flushBatch() {
     if (this.mainBatch && this.batchCount > 0 && this.batchIsValid) {
       try {
-        await this.mainBatch.write();
+        if (this.dbService.withWriteLock) {
+          await this.dbService.withWriteLock(() => this.mainBatch.write());
+        } else {
+          await this.mainBatch.write();
+        }
         this.batchCount = 0;
         this.batchIsValid = false;
       } catch (error) {

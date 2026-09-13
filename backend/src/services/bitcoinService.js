@@ -122,57 +122,25 @@ async function checkAddressConnection(address) {
   }
 }
 
-function exclusivePrefixEnd(prefix) {
-  const bytes = Buffer.from(prefix, "utf8");
-  for (let index = bytes.length - 1; index >= 0; index -= 1) {
-    if (bytes[index] < 0xff) {
-      const next = Buffer.from(bytes.subarray(0, index + 1));
-      next[index] += 1;
-      return next.toString("utf8");
+async function listTaintedWallets(query = {}) {
+  const { parseWalletListQuery } = require("../utils/validation");
+  const { queryWallets, needsHopIndex } = require("./walletQueryService");
+  const normalized = parseWalletListQuery(query);
+  const db = await dbService.init();
+  if (needsHopIndex(normalized)) {
+    const index = require("./walletIndexService");
+    // Bootstrap starts the backfill after seeds. Requests never race seed writes.
+    if (!index.isReady()) {
+      const error = new Error("Preparing global wallet filters");
+      error.code = "WALLET_INDEX_BUILDING";
+      error.index = index.getStatus();
+      throw error;
     }
   }
-  return undefined;
-}
-
-async function listTaintedWallets({
-  limit = 50,
-  cursor = null,
-  q = null,
-} = {}) {
-  const db = await dbService.init();
-  const pageSize = Math.min(Math.max(Number.parseInt(limit, 10) || 50, 1), 200);
-  const prefix = typeof q === "string" && q ? q : null;
-  const range = {
-    fillCache: false,
-    limit: pageSize + 1,
-    lt: prefix ? exclusivePrefixEnd(`a:${prefix}`) : "a:\xff",
-  };
-
-  if (cursor) {
-    range.gt = `a:${cursor}`;
-  } else if (prefix) {
-    range.gte = `a:${prefix}`;
-  } else {
-    range.gt = "a:";
-  }
-
-  const wallets = [];
-  const iterator = db.iterator(range);
-
-  for await (const [key, value] of iterator) {
-    if (!key.startsWith("a:")) continue;
-    if (prefix && !key.startsWith(`a:${prefix}`)) break;
-    wallets.push(publicWallet(key.slice(2), value));
-    if (wallets.length > pageSize) break;
-  }
-
-  const hasMore = wallets.length > pageSize;
-  if (hasMore) wallets.pop();
-
-  return {
-    wallets,
-    nextCursor: hasMore ? wallets.at(-1).address : null,
-  };
+  const result = await queryWallets(db, normalized);
+  return { ...result, wallets: result.wallets.map(wallet => ({
+    ...wallet, isSatoshiAddress: SATOSHI_ADDRESS_SET.has(wallet.address),
+  })) };
 }
 
 module.exports = {

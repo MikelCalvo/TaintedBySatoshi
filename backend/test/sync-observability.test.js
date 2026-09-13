@@ -160,6 +160,75 @@ test("sync status exposes the configured LevelDB table block size", () => {
   assert.equal(sync.getStatus().storage.levelDbBlockKb, 32);
 });
 
+test("requestStop is synchronous and prevents scheduling another sync loop window", async () => {
+  let checks = 0;
+  let releaseCheck;
+  const checkGate = new Promise((resolve) => {
+    releaseCheck = resolve;
+  });
+  const sync = new BackgroundSyncService({
+    bitcoinRPC: {},
+    dbService: {},
+    logger: { info() {}, error() {} },
+  });
+  sync.isRunning = true;
+  sync.checkAndSync = async () => {
+    checks += 1;
+    await checkGate;
+  };
+
+  sync.startSyncLoop();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(checks, 1);
+
+  const returned = sync.requestStop();
+  assert.equal(returned, undefined);
+  assert.equal(sync.isRunning, false);
+
+  releaseCheck();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(checks, 1);
+  assert.equal(sync.syncInterval, null);
+});
+
+test("stop still waits for an active sync and closes after requestStop", async () => {
+  let finishSync;
+  const active = new Promise((resolve) => {
+    finishSync = resolve;
+  });
+  let mainClosed = false;
+  const sync = new BackgroundSyncService({
+    bitcoinRPC: {},
+    dbService: {
+      async close() {
+        mainClosed = true;
+      },
+    },
+    logger: { info() {}, error() {} },
+    satoshiAddresses: ["seed"],
+  });
+  sync.isRunning = true;
+  sync.activeSync = active;
+  sync.phase = "syncing";
+
+  sync.requestStop();
+  assert.equal(sync.isRunning, false);
+
+  let stopped = false;
+  const stopping = sync.stop().then(() => {
+    stopped = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+  assert.equal(mainClosed, false);
+
+  finishSync();
+  await stopping;
+  assert.equal(mainClosed, true);
+  assert.equal(sync.phase, "stopped");
+});
+
 test("stop waits for an active sync and closes the shared database", async () => {
   let finishSync;
   const active = new Promise((resolve) => {

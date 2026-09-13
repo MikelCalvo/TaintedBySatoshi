@@ -1,6 +1,7 @@
 const { Level } = require("level");
 const path = require("path");
 const defaultLogger = require("../utils/logger");
+const { walletHopIndexKey } = require("./walletIndexKeys");
 
 function boundedCacheBytes(value) {
   const parsed = Number.parseInt(value, 10);
@@ -23,6 +24,7 @@ class DatabaseService {
   constructor(options = {}) {
     this.db = null;
     this.opening = null;
+    this.writeQueue = Promise.resolve();
     this.dbPath =
       options.dbPath ||
       process.env.DB_PATH ||
@@ -46,6 +48,12 @@ class DatabaseService {
         }
       });
     this.logger = options.logger || defaultLogger;
+  }
+
+  withWriteLock(work) {
+    const pending = this.writeQueue.then(work);
+    this.writeQueue = pending.catch(() => {});
+    return pending;
   }
 
   async init() {
@@ -101,7 +109,17 @@ class DatabaseService {
   }
 
   async updateTaintedInfo(address, taintedInfo) {
-    await this.db.put(`a:${address}`, taintedInfo);
+    return this.withWriteLock(async () => {
+      const db = await this.init();
+      const previous = await this.getTaintedInfo(address);
+      const batch = db.batch();
+      if (previous && previous.d !== taintedInfo.d) {
+        batch.del(walletHopIndexKey(address, previous.d));
+      }
+      batch.put(`a:${address}`, taintedInfo);
+      batch.put(walletHopIndexKey(address, taintedInfo.d), 1);
+      await batch.write();
+    });
   }
 
   async getLiveOutpoint(outpoint) {

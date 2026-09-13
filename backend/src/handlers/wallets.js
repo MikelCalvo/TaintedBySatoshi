@@ -4,9 +4,16 @@ function handleListWallets({ listTaintedWallets, logger } = {}) {
   return async (req, res) => {
     try {
       const params = parseWalletListQuery(req.query || {});
-      const result = await listTaintedWallets(params);
+      const result = await listTaintedWallets({ ...params, cursor: req.query?.cursor ?? null });
       res.json(result);
     } catch (error) {
+      if (error.code === "WALLET_INDEX_BUILDING") {
+        res.set?.("Retry-After", "30");
+        return res.status(503).json({ error: error.code, message: error.message, index: error.index, retryAfter: 30 });
+      }
+      if (error.code === "WALLET_QUERY_TOO_BROAD") {
+        return res.status(422).json({ error: error.code, message: error.message });
+      }
       if (error.code === "INVALID_QUERY") {
         return res.status(400).json({
           error: "Invalid query",

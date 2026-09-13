@@ -59,8 +59,13 @@ the NAS. Increase it only when the host has measured memory headroom.
 `LEVELDB_BLOCK_KB` only affects newly written SST table files. Existing 4 KiB
 blocks stay readable; schema version 4 is unchanged; write buffer, max file
 size, and cache size are not altered. There is no forced `compactRange` or
-database rebuild. Rollback is `LEVELDB_BLOCK_KB=4` and a backend restart — no
+database rebuild. Rollback is `LEVELDB_BLOCK_KB=4` and a backend restart, with no
 data or schema reset.
+
+`/api/sync-status` reports `storage.levelDbBlockKb`. The pipeline window's
+`prefetchMs` measures the RPC fetch itself, excluding time a completed
+prefetch sits waiting for the previous window. `prefetchWaitMs` measures only
+the outstanding RPC wait when the next window consumes that prefetch.
 
 This is **not** a measured production catch-up gain. An isolated synthetic
 benchmark on the same NAS production path (not the active database), 12k

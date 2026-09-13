@@ -6,6 +6,7 @@ const {
   sanitizeInput,
   validateAndSanitizeAddress,
   parseWalletListQuery,
+  encodeWalletCursor,
 } = require("../src/utils/validation");
 
 const GENESIS_ADDRESS = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
@@ -45,11 +46,13 @@ test("wallet list query defaults preserve lexical address paging", () => {
     limit: 50,
     cursor: null,
     q: null,
+    sort: "address-asc", minHops: null, maxHops: null,
   });
   assert.deepEqual(parseWalletListQuery({ limit: "10" }), {
     limit: 10,
     cursor: null,
     q: null,
+    sort: "address-asc", minHops: null, maxHops: null,
   });
 });
 
@@ -58,6 +61,7 @@ test("wallet list query trims a case-sensitive address prefix and allows 0", () 
     limit: 50,
     cursor: null,
     q: "bc10q",
+    sort: "address-asc", minHops: null, maxHops: null,
   });
   assert.equal(parseWalletListQuery({ q: "  \t  " }).q, null);
 });
@@ -81,14 +85,10 @@ test("wallet list query rejects malformed q, cursor, and limit values", () => {
 });
 
 test("wallet list query scopes cursors to the requested prefix", () => {
-  assert.deepEqual(
-    parseWalletListQuery({ q: "bc1", cursor: "bc1qsf0hh825mv6t356fj4xlg39c5tmqa76l05zjcy" }),
-    {
-      limit: 50,
-      cursor: "bc1qsf0hh825mv6t356fj4xlg39c5tmqa76l05zjcy",
-      q: "bc1",
-    }
-  );
+  const base = parseWalletListQuery({ q: "bc1" });
+  const key = "a:bc1qsf0hh825mv6t356fj4xlg39c5tmqa76l05zjcy";
+  const cursor = encodeWalletCursor(base, key);
+  assert.deepEqual(parseWalletListQuery({ q: "bc1", cursor }), { ...base, cursor: key });
   assertInvalidWalletQuery({ q: "bc1", cursor: GENESIS_ADDRESS });
   assertInvalidWalletQuery({ q: "bc1", cursor: "BC1outside" });
 });

@@ -56,7 +56,7 @@ test("wallets mobile toolbar puts sort on its own row and Reset/Search on one xs
   assert.match(actionsRow, /direction=\{\{\s*xs:\s*["']row["']/);
   assert.match(actionsRow, /flex:\s*1/);
   assert.match(actionsRow, /minWidth:\s*0/);
-  assert.match(actionsRow, /minHeight:\s*48/);
+  assert.match(actionsRow, /minHeight:\s*44/);
 });
 
 test("wallets page does not pass unsupported MUI Stack alignItems or justifyContent props", () => {
@@ -66,13 +66,21 @@ test("wallets page does not pass unsupported MUI Stack alignItems or justifyCont
   assert.match(page, /sx=\{\{[\s\S]*justifyContent:/);
 });
 
-test("wallets page uses loaded-scope copy, match counts, and distinct empty states", () => {
+test("wallets page uses global-scope copy, match counts, and distinct empty states", () => {
   assert.match(page, /getScopeCopy\(/);
   assert.match(page, /getMatchSummary\(/);
   assert.match(page, /getEmptyState\(/);
   assert.match(page, /data-empty-kind=\{emptyState\.kind\}/);
   assert.match(page, /shouldShowLoadMore\(/);
-  assert.match(page, /Load more/);
+  assert.match(page, /loadMoreLabel/);
+  assert.match(page, /getLoadMoreLabel/);
+  assert.match(page, /formatWalletsUpdatedAt/);
+  assert.match(page, /getVisibleWallets/);
+  assert.match(page, /index-building/);
+  assert.doesNotMatch(page, /applyLoadedView/);
+  assert.doesNotMatch(page, /loaded wallets only/);
+  assert.doesNotMatch(page, /Minimum hops on loaded results/);
+  assert.doesNotMatch(page, /Maximum hops on loaded results/);
 });
 
 test("wallets page uses cards on narrow screens and a wrapping table on desktop", () => {
@@ -80,7 +88,7 @@ test("wallets page uses cards on narrow screens and a wrapping table on desktop"
   assert.match(page, /display: \{ xs: "none", md: "block" \}/);
   assert.match(page, /wordBreak: "break-all"/);
   assert.match(page, /overflowWrap: "anywhere"/);
-  assert.match(page, /minHeight: 48/);
+  assert.match(page, /minHeight: 44/);
   assert.match(page, /Not available/);
   assert.doesNotMatch(page, /inputProps=/);
   assert.match(page, /slotProps=\{\{/);
@@ -93,4 +101,11 @@ test("wallets page wires abortable search and load-more through the session load
   assert.match(page, /type: "submit-search"/);
   assert.match(page, /append: true/);
   assert.match(page, /type: "reset"/);
+  assert.match(page, /type: "set-sort"/);
+  assert.match(page, /type: "refresh-snapshot"/);
+  assert.match(page, /sort: session\.sort/);
+  assert.match(page, /minHops: session\.minHops/);
+  assert.match(page, /maxHops: session\.maxHops/);
+  assert.match(page, /createWalletsRefreshScheduler/);
+  assert.match(page, /document\.visibilityState/);
 });

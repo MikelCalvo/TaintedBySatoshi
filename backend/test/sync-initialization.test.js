@@ -73,7 +73,7 @@ test("undefined LevelDB reads count as missing seed wallets", async () => {
 
   assert.deepEqual(
     stored.map((entry) => entry.key).sort(),
-    ["a:seed-a", "a:seed-b", "seeds_initialized"]
+    ["a:seed-a", "a:seed-b", "h:0000000000000000:seed-a", "h:0000000000000000:seed-b", "seeds_initialized"]
   );
   assert.equal(service.taintStats.taintedWallets, 2);
 });

@@ -144,6 +144,7 @@ test("live utxos, spent deletes, wallets and checkpoint share one commit", async
     [
       ["del", "u:parent:0"],
       ["put", "u:child:0"],
+      ["put", "h:0000000000000001:alice"],
       ["put", "a:alice"],
       ["put", "scan_progress"],
     ]
@@ -211,7 +212,7 @@ test("sync records stage timings and write amplification per block", async () =>
     taintedOutputs: 3,
     spentOutpoints: 2,
     addressWrites: 2,
-    batchOperations: 4,
+    batchOperations: 5,
   });
   assert.deepEqual(service.getStatus().metrics.pipeline.window, {
     startBlock: 30,
@@ -493,6 +494,6 @@ test("same-window spends reuse live outpoints without a second database read", a
   assert.deepEqual(writtenKeys.at(-1), ["put", "scan_progress"]);
   assert.deepEqual(
     new Set(writtenKeys.slice(1, -1).map((entry) => entry.join(":"))),
-    new Set(["put:u:child-b:0", "put:a:alice", "put:a:bob"])
+    new Set(["put:u:child-b:0", "put:a:alice", "put:a:bob", "put:h:0000000000000001:alice", "put:h:0000000000000002:bob"])
   );
 });

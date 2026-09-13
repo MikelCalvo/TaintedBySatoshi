@@ -44,6 +44,21 @@ test("GET /api/wallets returns 400 for malformed q and invalid cursors", async (
   assert.deepEqual(listed, []);
 });
 
+test("GET /api/wallets reports index preparation with a rate-limit-safe retry", async () => {
+  const handler = handleListWallets({
+    async listTaintedWallets() { const e = new Error("Preparing global wallet filters"); e.code = "WALLET_INDEX_BUILDING"; e.index = { ready: false, indexed: 20, total: 100 }; throw e; },
+    logger: { error() {} },
+  });
+  const res = mockResponse();
+  const headers = {};
+  res.set = (key, value) => { headers[key] = value; return res; };
+  await handler({ query: { sort: "hops-asc" } }, res);
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.retryAfter, 30);
+  assert.equal(headers["Retry-After"], "30");
+  assert.equal(res.body.index.ready, false);
+});
+
 test("GET /api/wallets passes a scoped prefix query through to listing", async () => {
   const handler = handleListWallets({
     async listTaintedWallets(params) {
@@ -52,10 +67,13 @@ test("GET /api/wallets passes a scoped prefix query through to listing", async (
     logger: { error() {} },
   });
 
+  const { parseWalletListQuery, encodeWalletCursor } = require("../src/utils/validation");
+  const base = parseWalletListQuery({ q: "bc1", limit: 2 });
+  const cursor = encodeWalletCursor(base, "a:bc1aaa");
   const res = mockResponse();
-  await handler({ query: { q: "  bc1  ", limit: "2", cursor: "bc1aaa" } }, res);
+  await handler({ query: { q: "  bc1  ", limit: "2", cursor } }, res);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.wallets[0].address, "bc1aaa");
   assert.equal(res.body.nextCursor, "bc1aaa");
-  assert.deepEqual(res.body.params, { limit: 2, cursor: "bc1aaa", q: "bc1" });
+  assert.deepEqual(res.body.params, { ...base, cursor });
 });

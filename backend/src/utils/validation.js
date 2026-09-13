@@ -90,33 +90,50 @@ function parseBoundedAddressToken(value, { optional = false } = {}) {
   return trimmed;
 }
 
+function parseHopBound(value) {
+  if (value == null || value === "") return null;
+  if (!["string", "number"].includes(typeof value) || !/^\d+$/.test(String(value))) {
+    throw invalidQuery("Invalid hop bound");
+  }
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) throw invalidQuery("Invalid hop bound");
+  return number;
+}
+
+function walletQueryScope(query) {
+  return [query.sort, query.q, query.minHops, query.maxHops];
+}
+
+function encodeWalletCursor(query, key) {
+  return Buffer.from(JSON.stringify({ v: 1, scope: walletQueryScope(query), key })).toString("base64url");
+}
+
 function parseWalletListQuery(query = {}) {
   const { limit, cursor, q } = query;
-
-  if (
-    limit != null &&
-    typeof limit !== "string" &&
-    typeof limit !== "number"
-  ) {
-    throw invalidQuery();
-  }
-
+  if (limit != null && typeof limit !== "string" && typeof limit !== "number") throw invalidQuery();
   const parsedLimit = Number.parseInt(limit, 10);
-  const pageSize = Number.isInteger(parsedLimit)
-    ? Math.min(Math.max(parsedLimit, 1), 200)
-    : 50;
-  const prefix = parseBoundedAddressToken(q, { optional: true });
-  const parsedCursor = parseBoundedAddressToken(cursor);
-
-  if (parsedCursor && prefix && !parsedCursor.startsWith(prefix)) {
-    throw invalidQuery();
+  const pageSize = Number.isInteger(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 200) : 50;
+  const sort = query.sort ?? "address-asc";
+  if (!["address-asc", "address-desc", "hops-asc", "hops-desc"].includes(sort)) throw invalidQuery("Invalid wallet sort");
+  const normalized = { limit: pageSize, q: parseBoundedAddressToken(q, { optional: true }), sort,
+    minHops: parseHopBound(query.minHops), maxHops: parseHopBound(query.maxHops), cursor: null };
+  if (normalized.minHops != null && normalized.maxHops != null && normalized.minHops > normalized.maxHops) throw invalidQuery("Invalid hop range");
+  if (cursor != null) {
+    if (typeof cursor !== "string" || !/^[A-Za-z0-9_-]{1,1024}$/.test(cursor)) throw invalidQuery("Invalid wallet cursor");
+    let decoded;
+    try { decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); } catch { throw invalidQuery("Invalid wallet cursor"); }
+    if (decoded?.v !== 1 || JSON.stringify(decoded.scope) !== JSON.stringify(walletQueryScope(normalized)) || typeof decoded.key !== "string") throw invalidQuery("Cursor does not match wallet filters");
+    const key = decoded.key;
+    const address = sort.startsWith("hops") ? key.slice(19) : key.slice(2);
+    if (sort.startsWith("hops") ? !/^h:\d{16}:[0-9A-HJ-NP-Za-z]{1,90}$/.test(key) : !/^a:[0-9A-HJ-NP-Za-z]{1,90}$/.test(key)) throw invalidQuery("Invalid wallet cursor key");
+    if (normalized.q && !address.startsWith(normalized.q)) throw invalidQuery("Invalid wallet cursor prefix");
+    if (sort.startsWith("hops")) {
+      const hops = Number(key.slice(2,18));
+      if (!Number.isSafeInteger(hops) || hops < (normalized.minHops ?? 0) || hops > (normalized.maxHops ?? Number.MAX_SAFE_INTEGER)) throw invalidQuery("Invalid wallet cursor hops");
+    }
+    normalized.cursor = key;
   }
-
-  return {
-    limit: pageSize,
-    cursor: parsedCursor,
-    q: prefix,
-  };
+  return normalized;
 }
 
 module.exports = {
@@ -124,5 +141,6 @@ module.exports = {
   sanitizeInput,
   validateAndSanitizeAddress,
   parseWalletListQuery,
+  encodeWalletCursor,
   MAX_ADDRESS_PREFIX_LENGTH,
 };

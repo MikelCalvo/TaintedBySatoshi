@@ -100,9 +100,10 @@ function mockIteratorDb(records) {
   const calls = [];
   return {
     calls,
+    snapshot() { return { async close() {} }; },
     iterator(options) {
       calls.push(options);
-      return (async function* () {
+      const generator = (async function* () {
         let yielded = 0;
         for (const entry of records) {
           const [key] = entry;
@@ -115,6 +116,10 @@ function mockIteratorDb(records) {
           yield entry;
         }
       })();
+      return {
+        async next() { const r = await generator.next(); return r.done ? undefined : r.value; },
+        async close() { await generator.return(); },
+      };
     },
   };
 }
@@ -137,11 +142,13 @@ test("wallet listing pages compact hop records without historical caches", async
         publicListedWallet("bob", records[1][1]),
       ],
       nextCursor: null,
+      hasMore: false,
+      scanned: 3,
     });
     assert.equal(db.calls[0].fillCache, false);
     assert.equal(db.calls[0].limit, 11);
-    assert.equal(db.calls[0].gt, "a:");
-    assert.equal(db.calls[0].lt, "a:\xff");
+    assert.equal(db.calls[0].gte, "a:");
+    assert.equal(db.calls[0].lt, "a;");
   } finally {
     dbService.init = originalInit;
   }
@@ -164,6 +171,8 @@ test("wallet listing uses one-row lookahead for a precise nextCursor", async () 
         publicListedWallet("bob", records[1][1]),
       ],
       nextCursor: null,
+      hasMore: false,
+      scanned: 3,
     });
     assert.equal(db.calls[0].limit, 3);
   } finally {
@@ -197,12 +206,12 @@ test("wallet listing seeks a:q without scanning earlier keys", async () => {
       page.wallets.map((wallet) => wallet.address),
       ["bc1aaa", "bc1bbb"]
     );
-    assert.equal(page.nextCursor, "bc1bbb");
+    assert.equal(require("../src/utils/validation").parseWalletListQuery({ q: "bc1", cursor: page.nextCursor }).cursor, "a:bc1bbb");
 
     const nextPage = await listTaintedWallets({
       limit: 2,
       q: "bc1",
-      cursor: "bc1bbb",
+      cursor: page.nextCursor,
     });
     assert.equal(db.calls[1].gt, "a:bc1bbb");
     assert.equal(db.calls[1].gte, undefined);
@@ -255,7 +264,7 @@ test("prefix search on a real LevelDB skips earlier keys and stays case-sensitiv
       page.wallets.map((wallet) => wallet.address),
       ["bc1qmatch1", "bc1qmatch2"]
     );
-    assert.equal(page.nextCursor, "bc1qmatch2");
+    assert.equal(require("../src/utils/validation").parseWalletListQuery({ q: "bc1q", cursor: page.nextCursor }).cursor, "a:bc1qmatch2");
 
     const nextPage = await listTaintedWallets({
       limit: 2,

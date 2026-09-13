@@ -19,7 +19,7 @@ module.exports = {
       // Prevent PM2 from killing the process during startup
       wait_ready: false,
       listen_timeout: 30000,  // 30 seconds to start listening
-      kill_timeout: 10000,    // 10 seconds to gracefully shutdown
+      kill_timeout: 1200000,  // 20 minutes for an in-flight sync window
       // Exponential backoff restart delay
       exp_backoff_restart_delay: 1000,  // Start with 1 second delay
       max_restarts: 5,        // Limit restarts to 5 per minute

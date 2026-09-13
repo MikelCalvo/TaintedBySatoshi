@@ -8,6 +8,7 @@ const {
   listTaintedWallets,
 } = require("./services/bitcoinService");
 const backgroundSyncService = require("./services/backgroundSyncService");
+const walletIndexService = require("./services/walletIndexService");
 const analyticsService = require("./services/analyticsService");
 const { validateAndSanitizeAddress } = require("./utils/validation");
 const { handleListWallets } = require("./handlers/wallets");
@@ -164,7 +165,7 @@ app.use((err, req, res, next) => {
 app.get("/api/sync-status", (req, res) => {
   try {
     const status = backgroundSyncService.getStatus();
-    res.json(status);
+    res.json({ ...status, walletIndex: walletIndexService.getStatus() });
   } catch (error) {
     logger.error("Error getting sync status", { error: error.message });
     res.status(500).json({
@@ -335,6 +336,7 @@ const server = app.listen(PORT, () => {
     try {
       logger.info("Starting background sync service...");
       await backgroundSyncService.start();
+      await walletIndexService.ensureStarted();
     } catch (error) {
       logger.error("Failed to start background sync service", { error: error.message });
     }
@@ -356,12 +358,14 @@ async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info(`Received ${signal}, shutting down gracefully`);
+  backgroundSyncService.requestStop();
 
   server.close(async (closeError) => {
     if (closeError) {
       logger.error("HTTP server shutdown failed", { error: closeError.message });
     }
     try {
+      await walletIndexService.stop();
       await backgroundSyncService.stop();
       await analyticsService.stop?.();
       process.exit(closeError ? 1 : 0);
@@ -371,7 +375,7 @@ async function shutdown(signal) {
     }
   });
 
-  setTimeout(() => process.exit(1), 30000).unref();
+  setTimeout(() => process.exit(1), 1200000).unref();
 }
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));

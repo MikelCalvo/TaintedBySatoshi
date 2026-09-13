@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import NextLink from "next/link";
 import {
   Box,
@@ -8,6 +8,7 @@ import {
   Container,
   FormControl,
   InputLabel,
+  LinearProgress,
   Link,
   MenuItem,
   Paper,
@@ -23,18 +24,24 @@ import {
 } from "@mui/material";
 import SEO from "../components/SEO";
 import {
+  EMPTY_PAGE_AUTO_CONTINUE_MAX,
   SORT_OPTIONS,
-  applyLoadedView,
+  formatWalletsUpdatedAt,
   getEmptyState,
+  getLoadMoreLabel,
   getMatchSummary,
   getScopeCopy,
+  getVisibleWallets,
   isHopRangeValid,
   parseHopBound,
+  shouldAutoContinueEmptyPage,
+  shouldRefreshWalletsSnapshot,
   shouldShowLoadMore,
 } from "../utils/walletsExplorer.mjs";
 import {
   createInitialWalletsSession,
   createWalletsLoader,
+  createWalletsRefreshScheduler,
   reduceWalletsSession,
 } from "../utils/walletsSession.mjs";
 
@@ -48,8 +55,8 @@ const wrappingSx = {
 };
 
 const touchButtonSx = {
-  minHeight: 48,
-  px: 2.5,
+  minHeight: 44,
+  px: 2,
 };
 
 function WalletFields({ wallet }) {
@@ -84,6 +91,18 @@ function WalletFields({ wallet }) {
   );
 }
 
+function loadApplied(loader, session, extras = {}) {
+  if (!loader) return;
+  loader.load({
+    q: session.appliedQuery,
+    sort: session.sort,
+    minHops: session.minHops,
+    maxHops: session.maxHops,
+    apply: extras.apply,
+    ...extras,
+  });
+}
+
 export default function WalletsPage() {
   const [session, dispatch] = useReducer(
     reduceWalletsSession,
@@ -92,25 +111,69 @@ export default function WalletsPage() {
   );
   const [hopError, setHopError] = useState("");
   const loaderRef = useRef(null);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
 
   useEffect(() => {
     const loader = createWalletsLoader({ apiUrl: API_URL });
     loaderRef.current = loader;
     dispatch({ type: "reset" });
-    loader.load({ apply: dispatch });
-    return () => loader.abort();
+    loader.load({ sort: "address-asc", apply: dispatch });
+
+    const scheduler = createWalletsRefreshScheduler({
+      isVisible: () => document.visibilityState === "visible",
+      getState: () => sessionRef.current,
+      onRefresh: () => {
+        const current = sessionRef.current;
+        if (
+          !shouldRefreshWalletsSnapshot({
+            loading: current.loading,
+            visible: document.visibilityState === "visible",
+            mounted: true,
+            indexBuilding: Boolean(current.indexBuilding),
+          })
+        ) {
+          return;
+        }
+        dispatch({ type: "refresh-snapshot" });
+        loadApplied(loader, current, { apply: dispatch });
+      },
+    });
+    scheduler.start();
+
+    return () => {
+      scheduler.stop();
+      loader.abort();
+    };
   }, []);
 
-  const visibleWallets = useMemo(
-    () =>
-      applyLoadedView(session.wallets, {
-        sort: session.sort,
-        minHops: session.minHops,
-        maxHops: session.maxHops,
-      }),
-    [session.wallets, session.sort, session.minHops, session.maxHops]
-  );
+  useEffect(() => {
+    const loader = loaderRef.current;
+    if (!loader || session.loading) return;
+    if (
+      !shouldAutoContinueEmptyPage({
+        walletsCount: session.wallets.length,
+        nextCursor: session.nextCursor,
+        autoContinues: session.autoContinues,
+      })
+    ) {
+      return;
+    }
+    const cursor = session.nextCursor;
+    dispatch({ type: "auto-continue" });
+    loadApplied(loader, session, { cursor, append: true, apply: dispatch });
+  }, [
+    session.loading,
+    session.wallets.length,
+    session.nextCursor,
+    session.autoContinues,
+    session.appliedQuery,
+    session.sort,
+    session.minHops,
+    session.maxHops,
+  ]);
 
+  const visibleWallets = getVisibleWallets(session.wallets);
   const emptyState = getEmptyState({
     loading: session.loading,
     error: session.error,
@@ -119,32 +182,46 @@ export default function WalletsPage() {
     query: session.appliedQuery,
     minHops: session.minHops,
     maxHops: session.maxHops,
+    nextCursor: session.nextCursor,
+    indexBuilding: session.indexBuilding,
   });
   const showLoadMore = shouldShowLoadMore({
     nextCursor: session.nextCursor,
     matchCount: visibleWallets.length,
     loading: session.loading,
   });
+  const loadMoreLabel = getLoadMoreLabel({
+    walletsCount: visibleWallets.length,
+    autoContinuesExhausted: (session.autoContinues || 0) >= EMPTY_PAGE_AUTO_CONTINUE_MAX,
+    loading: session.loading,
+  });
 
-  const applyHopDraft = (minValue, maxValue) => {
-    const minHops = parseHopBound(minValue);
-    const maxHops = parseHopBound(maxValue);
+  const parseDraftHops = () => {
+    const minHops = parseHopBound(session.draftMinHops);
+    const maxHops = parseHopBound(session.draftMaxHops);
     if (!isHopRangeValid(minHops, maxHops)) {
       setHopError("Hop range must use nonnegative whole numbers, with min ≤ max.");
-      return false;
+      return null;
     }
     setHopError("");
-    dispatch({ type: "apply-hop-range", minHops, maxHops });
-    return true;
+    return { minHops, maxHops };
   };
 
   const handleSubmit = (event) => {
     event.preventDefault();
-    if (!applyHopDraft(session.draftMinHops, session.draftMaxHops)) return;
+    const hops = parseDraftHops();
+    if (!hops) return;
     const loader = loaderRef.current;
     if (!loader) return;
+    dispatch({ type: "apply-hop-range", minHops: hops.minHops, maxHops: hops.maxHops });
     dispatch({ type: "submit-search", query: session.draftQuery });
-    loader.load({ q: session.draftQuery, apply: dispatch });
+    loader.load({
+      q: session.draftQuery,
+      sort: session.sort,
+      minHops: hops.minHops,
+      maxHops: hops.maxHops,
+      apply: dispatch,
+    });
   };
 
   const handleReset = () => {
@@ -152,7 +229,20 @@ export default function WalletsPage() {
     if (!loader) return;
     setHopError("");
     dispatch({ type: "reset" });
-    loader.load({ apply: dispatch });
+    loader.load({ sort: "address-asc", apply: dispatch });
+  };
+
+  const handleSort = (sort) => {
+    const loader = loaderRef.current;
+    if (!loader) return;
+    dispatch({ type: "set-sort", sort });
+    loader.load({
+      q: session.appliedQuery,
+      sort,
+      minHops: session.minHops,
+      maxHops: session.maxHops,
+      apply: dispatch,
+    });
   };
 
   const handleLoadMore = () => {
@@ -160,12 +250,7 @@ export default function WalletsPage() {
     if (!loader || !session.nextCursor) return;
     const cursor = session.nextCursor;
     dispatch({ type: "load-more" });
-    loader.load({
-      q: session.appliedQuery,
-      cursor,
-      append: true,
-      apply: dispatch,
-    });
+    loadApplied(loader, session, { cursor, append: true, apply: dispatch });
   };
 
   return (
@@ -175,32 +260,41 @@ export default function WalletsPage() {
         description="Browse Bitcoin wallets connected to Satoshi Nakamoto and the hop count of each connection."
         path="/wallets"
       />
-      <Container maxWidth="lg" sx={{ py: { xs: 3, md: 6 }, px: { xs: 2, sm: 3 } }}>
-        <Link component={NextLink} href="/" underline="hover" color="text.secondary">
+      <Container maxWidth="lg" sx={{ py: { xs: 1, md: 6 }, px: { xs: 2, sm: 3 } }}>
+        <Link component={NextLink} href="/" underline="hover" color="text.secondary" variant="body2">
           &larr; Back to search
         </Link>
-        <Typography variant="h4" sx={{ mt: 2, mb: 1 }}>
+        <Typography
+          variant="h4"
+          sx={{
+            mt: { xs: 0.5, md: 2 },
+            mb: { xs: 0.25, md: 1 },
+            fontSize: { xs: "1.75rem", md: undefined },
+            lineHeight: { xs: 1.2, md: undefined },
+          }}
+        >
           Tainted wallets
         </Typography>
-        <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
-          Every wallet that received coins originating from a Patoshi/Satoshi
-          coinbase, with the shortest hop count found so far.
+        <Typography variant="body2" color="text.secondary" sx={{ mb: { xs: 1, md: 3 } }}>
+          Wallets connected to Patoshi/Satoshi coinbase outputs.
         </Typography>
 
         <Paper
           component="form"
           onSubmit={handleSubmit}
-          sx={{ p: { xs: 2, sm: 3 }, mb: 3 }}
+          sx={{ p: { xs: 1, sm: 3 }, mb: { xs: 1, md: 3 } }}
         >
-          <Stack spacing={2}>
+          <Stack spacing={{ xs: 1, sm: 2 }}>
             <TextField
               fullWidth
+              size="small"
               label="Address prefix"
               placeholder="Case-sensitive address or prefix"
               value={session.draftQuery}
               onChange={(event) =>
                 dispatch({ type: "set-draft-query", query: event.target.value })
               }
+              sx={{ "& .MuiInputBase-root": { minHeight: 44 } }}
               slotProps={{
                 htmlInput: {
                   "aria-label": "Address prefix",
@@ -208,17 +302,15 @@ export default function WalletsPage() {
                 },
               }}
             />
-            <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
-              <FormControl fullWidth>
+            <Stack direction={{ xs: "column", md: "row" }} spacing={{ xs: 1, sm: 2 }}>
+              <FormControl fullWidth size="small">
                 <InputLabel id="wallets-sort-label">Sort</InputLabel>
                 <Select
                   labelId="wallets-sort-label"
                   label="Sort"
                   value={session.sort}
-                  onChange={(event) =>
-                    dispatch({ type: "set-sort", sort: event.target.value })
-                  }
-                  sx={{ minHeight: 48 }}
+                  onChange={(event) => handleSort(event.target.value)}
+                  sx={{ minHeight: 44 }}
                 >
                   {SORT_OPTIONS.map((option) => (
                     <MenuItem key={option.value} value={option.value}>
@@ -228,8 +320,9 @@ export default function WalletsPage() {
                 </Select>
               </FormControl>
             </Stack>
-            <Stack direction="row" spacing={2} sx={{ alignItems: { md: "flex-start" } }}>
+            <Stack direction="row" spacing={1.5} sx={{ alignItems: { md: "flex-start" } }}>
               <TextField
+                size="small"
                 label="Min hops"
                 value={session.draftMinHops}
                 onChange={(event) => {
@@ -238,18 +331,18 @@ export default function WalletsPage() {
                     minHops: event.target.value,
                     maxHops: session.draftMaxHops,
                   });
-                  applyHopDraft(event.target.value, session.draftMaxHops);
                 }}
-                sx={{ flex: 1, minWidth: 0 }}
+                sx={{ flex: 1, minWidth: 0, "& .MuiInputBase-root": { minHeight: 44 } }}
                 slotProps={{
                   htmlInput: {
                     inputMode: "numeric",
-                    "aria-label": "Minimum hops on loaded results",
+                    "aria-label": "Minimum hops",
                   },
                 }}
                 error={Boolean(hopError)}
               />
               <TextField
+                size="small"
                 label="Max hops"
                 value={session.draftMaxHops}
                 onChange={(event) => {
@@ -258,13 +351,12 @@ export default function WalletsPage() {
                     minHops: session.draftMinHops,
                     maxHops: event.target.value,
                   });
-                  applyHopDraft(session.draftMinHops, event.target.value);
                 }}
-                sx={{ flex: 1, minWidth: 0 }}
+                sx={{ flex: 1, minWidth: 0, "& .MuiInputBase-root": { minHeight: 44 } }}
                 slotProps={{
                   htmlInput: {
                     inputMode: "numeric",
-                    "aria-label": "Maximum hops on loaded results",
+                    "aria-label": "Maximum hops",
                   },
                 }}
                 error={Boolean(hopError)}
@@ -273,33 +365,32 @@ export default function WalletsPage() {
             </Stack>
             <Stack
               direction={{ xs: "row", sm: "row" }}
-              spacing={1.5}
+              spacing={1}
               sx={{ justifyContent: "flex-end" }}
             >
               <Button
                 type="button"
                 variant="outlined"
                 onClick={handleReset}
-                sx={{ ...touchButtonSx, flex: 1, minWidth: 0, minHeight: 48 }}
+                sx={{ ...touchButtonSx, flex: 1, minWidth: 0, minHeight: 44 }}
               >
                 Reset
               </Button>
               <Button
                 type="submit"
                 variant="contained"
-                sx={{ ...touchButtonSx, flex: 1, minWidth: 0, minHeight: 48 }}
+                sx={{ ...touchButtonSx, flex: 1, minWidth: 0, minHeight: 44 }}
               >
                 Search
               </Button>
             </Stack>
-            <Typography variant="body2" color="text.secondary">
-              {getScopeCopy()}
-            </Typography>
-            <Typography variant="body2">
+            <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.3, display: "block" }}>
+              {getScopeCopy()}{" "}
               {getMatchSummary({
                 matchCount: visibleWallets.length,
-                loadedCount: session.wallets.length,
+                scanned: session.scanned,
               })}
+              {session.updatedAt ? ` · ${formatWalletsUpdatedAt(session.updatedAt)}` : ""}
             </Typography>
           </Stack>
         </Paper>
@@ -318,12 +409,26 @@ export default function WalletsPage() {
             >
               {emptyState.message}
             </Typography>
+            {emptyState.kind === "index-building" && (
+              <Box sx={{ mt: 2 }}>
+                <LinearProgress />
+                {session.indexBuilding?.indexed != null && (
+                  <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
+                    {session.indexBuilding.indexed}
+                    {session.indexBuilding.total != null
+                      ? ` / ${session.indexBuilding.total}`
+                      : ""}
+                    {session.indexBuilding.phase ? ` · ${session.indexBuilding.phase}` : ""}
+                  </Typography>
+                )}
+              </Box>
+            )}
           </Paper>
         ) : (
           <>
             <Stack
               spacing={1.5}
-              sx={{ display: { xs: "flex", md: "none" }, mb: 2 }}
+              sx={{ display: { xs: "flex", md: "none" }, mb: { xs: 1, md: 2 } }}
             >
               {visibleWallets.map((wallet) => (
                 <Card key={wallet.address}>
@@ -378,7 +483,7 @@ export default function WalletsPage() {
               onClick={handleLoadMore}
               sx={{ ...touchButtonSx, minWidth: 160 }}
             >
-              {session.loading ? "Loading..." : "Load more"}
+              {loadMoreLabel}
             </Button>
           ) : (
             <Typography variant="body2" color="text.secondary">
