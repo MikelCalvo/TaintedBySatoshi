@@ -1,6 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
+// Importing the legacy entrypoint must not depend on a developer .env.
+process.env.BITCOIN_RPC_USER = "test";
+process.env.BITCOIN_RPC_PASS = "test";
+
 const {
   updateSatoshiTransactions,
 } = require("../src/scripts/updateSatoshiData");
