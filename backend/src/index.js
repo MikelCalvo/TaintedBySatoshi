@@ -10,6 +10,7 @@ const {
 const backgroundSyncService = require("./services/backgroundSyncService");
 const analyticsService = require("./services/analyticsService");
 const { validateAndSanitizeAddress } = require("./utils/validation");
+const { handleListWallets } = require("./handlers/wallets");
 const logger = require("./utils/logger");
 const fs = require("fs");
 const path = require("path");
@@ -306,22 +307,10 @@ app.get("/api/check/:address", addressCheckLimiter, async (req, res) => {
   }
 });
 
-app.get("/api/wallets", async (req, res) => {
-  try {
-    const limit = Number.parseInt(req.query.limit, 10);
-    const cursor =
-      typeof req.query.cursor === "string" ? req.query.cursor : null;
-    const result = await listTaintedWallets({ limit, cursor });
-    res.json(result);
-  } catch (error) {
-    logger.error("Error listing wallets", { error: error.message });
-    res.status(500).json({
-      error: "Failed to list tainted wallets",
-      message:
-        "The server encountered an error while processing your request. Please try again.",
-    });
-  }
-});
+app.get(
+  "/api/wallets",
+  handleListWallets({ listTaintedWallets, logger })
+);
 
 // Global error handlers to prevent PM2 restarts
 process.on('unhandledRejection', (reason, promise) => {

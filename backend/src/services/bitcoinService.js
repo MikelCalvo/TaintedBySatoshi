@@ -122,24 +122,56 @@ async function checkAddressConnection(address) {
   }
 }
 
-async function listTaintedWallets({ limit = 50, cursor = null } = {}) {
+function exclusivePrefixEnd(prefix) {
+  const bytes = Buffer.from(prefix, "utf8");
+  for (let index = bytes.length - 1; index >= 0; index -= 1) {
+    if (bytes[index] < 0xff) {
+      const next = Buffer.from(bytes.subarray(0, index + 1));
+      next[index] += 1;
+      return next.toString("utf8");
+    }
+  }
+  return undefined;
+}
+
+async function listTaintedWallets({
+  limit = 50,
+  cursor = null,
+  q = null,
+} = {}) {
   const db = await dbService.init();
   const pageSize = Math.min(Math.max(Number.parseInt(limit, 10) || 50, 1), 200);
+  const prefix = typeof q === "string" && q ? q : null;
+  const range = {
+    fillCache: false,
+    limit: pageSize + 1,
+    lt: prefix ? exclusivePrefixEnd(`a:${prefix}`) : "a:\xff",
+  };
+
+  if (cursor) {
+    range.gt = `a:${cursor}`;
+  } else if (prefix) {
+    range.gte = `a:${prefix}`;
+  } else {
+    range.gt = "a:";
+  }
+
   const wallets = [];
-  const iterator = db.iterator({
-    gt: cursor ? `a:${cursor}` : "a:",
-    lt: "a:\xff",
-    limit: pageSize,
-  });
+  const iterator = db.iterator(range);
 
   for await (const [key, value] of iterator) {
     if (!key.startsWith("a:")) continue;
+    if (prefix && !key.startsWith(`a:${prefix}`)) break;
     wallets.push(publicWallet(key.slice(2), value));
+    if (wallets.length > pageSize) break;
   }
+
+  const hasMore = wallets.length > pageSize;
+  if (hasMore) wallets.pop();
 
   return {
     wallets,
-    nextCursor: wallets.length === pageSize ? wallets.at(-1).address : null,
+    nextCursor: hasMore ? wallets.at(-1).address : null,
   };
 }
 

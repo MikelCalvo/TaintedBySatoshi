@@ -68,8 +68,61 @@ function validateAndSanitizeAddress(address) {
   return sanitized;
 }
 
+const MAX_ADDRESS_PREFIX_LENGTH = 90;
+const WALLET_QUERY_CHARSET = /^[0-9A-HJ-NP-Za-z]+$/;
+
+function invalidQuery(message = "Invalid query") {
+  const error = new Error(message);
+  error.code = "INVALID_QUERY";
+  return error;
+}
+
+function parseBoundedAddressToken(value, { optional = false } = {}) {
+  if (value == null) return null;
+  if (typeof value !== "string") throw invalidQuery();
+  const trimmed = value.trim();
+  if (!trimmed) {
+    if (optional) return null;
+    throw invalidQuery();
+  }
+  if (trimmed.length > MAX_ADDRESS_PREFIX_LENGTH) throw invalidQuery();
+  if (!WALLET_QUERY_CHARSET.test(trimmed)) throw invalidQuery();
+  return trimmed;
+}
+
+function parseWalletListQuery(query = {}) {
+  const { limit, cursor, q } = query;
+
+  if (
+    limit != null &&
+    typeof limit !== "string" &&
+    typeof limit !== "number"
+  ) {
+    throw invalidQuery();
+  }
+
+  const parsedLimit = Number.parseInt(limit, 10);
+  const pageSize = Number.isInteger(parsedLimit)
+    ? Math.min(Math.max(parsedLimit, 1), 200)
+    : 50;
+  const prefix = parseBoundedAddressToken(q, { optional: true });
+  const parsedCursor = parseBoundedAddressToken(cursor);
+
+  if (parsedCursor && prefix && !parsedCursor.startsWith(prefix)) {
+    throw invalidQuery();
+  }
+
+  return {
+    limit: pageSize,
+    cursor: parsedCursor,
+    q: prefix,
+  };
+}
+
 module.exports = {
   isValidBitcoinAddress,
   sanitizeInput,
   validateAndSanitizeAddress,
+  parseWalletListQuery,
+  MAX_ADDRESS_PREFIX_LENGTH,
 };
