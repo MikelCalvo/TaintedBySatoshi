@@ -10,6 +10,15 @@ function boundedCacheBytes(value) {
   return megabytes * 1024 * 1024;
 }
 
+function boundedBlockBytes(value) {
+  const text = value == null ? "" : String(value).trim();
+  if (!/^-?\d+$/.test(text)) {
+    return 32 * 1024;
+  }
+  const kilobytes = Math.min(Math.max(Number.parseInt(text, 10), 4), 64);
+  return kilobytes * 1024;
+}
+
 class DatabaseService {
   constructor(options = {}) {
     this.db = null;
@@ -23,6 +32,7 @@ class DatabaseService {
       valueEncoding: "json",
       createIfMissing: true,
       cacheSize: boundedCacheBytes(this.environment.LEVELDB_CACHE_MB),
+      blockSize: boundedBlockBytes(this.environment.LEVELDB_BLOCK_KB),
     };
     this.createDatabase =
       options.createDatabase ||

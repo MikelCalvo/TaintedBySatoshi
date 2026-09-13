@@ -48,12 +48,36 @@ Create `backend/.env` with these variables:
 | `CHUNK_SIZE` | Blocks per sync chunk (clamped to 1-500) | `100` |
 | `SYNC_PREFETCH_CONCURRENCY` | Concurrent RPC block fetches (clamped to 1-32) | `8` |
 | `LEVELDB_CACHE_MB` | LevelDB uncompressed read cache in MiB (clamped to 16-512) | `128` |
+| `LEVELDB_BLOCK_KB` | LevelDB SST table block size in KiB (strict integer; accepted 4-64, default 32; valid out-of-range values clamp, non-integers/text fall back to 32) | `32` |
 | `LIVE_UTXO_CACHE_SIZE` | Hot live-taint UTXOs held in bounded LRU memory (clamped to 1-1,000,000) | `250000` |
 | `ADDRESS_CACHE_SIZE` | Hot compact wallet hop records held in bounded LRU memory (clamped to 1-1,000,000) | `250000` |
 
 The LevelDB cache is especially relevant when the database lives on NAS/CIFS.
 It reduces repeated remote table-block reads without moving persistent data off
 the NAS. Increase it only when the host has measured memory headroom.
+
+`LEVELDB_BLOCK_KB` only affects newly written SST table files. Existing 4 KiB
+blocks stay readable; schema version 4 is unchanged; write buffer, max file
+size, and cache size are not altered. There is no forced `compactRange` or
+database rebuild. Rollback is `LEVELDB_BLOCK_KB=4` and a backend restart — no
+data or schema reset.
+
+This is **not** a measured production catch-up gain. An isolated synthetic
+benchmark on the same NAS production path (not the active database), 12k
+fixture wallet/UTXO records per trial, compared default 4 KiB blocks vs 32 KiB:
+
+| Trial | 4 KiB | 32 KiB |
+|-------|-------|--------|
+| Flush (ms) | 49555 / 47865 | 28900 / 21681 |
+| Batch write (ms) | 14707 / 15019 | 18894 / 19081 |
+| Cold 100 reads (ms) | 248 / 246 | 130 / 277 |
+| SST bytes | 1651049 | 1539513 |
+
+Flush was faster at 32 KiB; batched writes were slower; cold random reads were
+mixed (130 ms vs 277 ms on the second 32 KiB trial). Larger blocks can hurt
+random-read latency because each lookup reads a bigger uncompressed block.
+Treat 32 KiB as a bounded local-NAS default, not a guaranteed production
+speedup.
 
 ### Bitcoin Performance Tuning
 

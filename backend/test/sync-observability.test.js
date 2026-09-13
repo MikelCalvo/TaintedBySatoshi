@@ -115,6 +115,51 @@ test("status reports live utxo and tainted wallet counts", () => {
   assert.equal(status.stats.taintedWallets, 8);
 });
 
+test("prefetch timing excludes completed-window idle time", async () => {
+  let clock = 0;
+  const sync = new BackgroundSyncService({
+    now: () => clock,
+    bitcoinRPC: { async getBlocksWindow() { clock = 40; return [{ height: 1 }]; } },
+    dbService: {},
+    logger: { info() {}, error() {} },
+  });
+  sync.scheduleWindowPrefetch(1, 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  clock = 1000;
+  const loaded = await sync.loadBlocksWindow(1, 1);
+  assert.equal(loaded.prefetchMs, 40);
+  assert.equal(loaded.prefetchWaitMs, 0);
+  assert.deepEqual(loaded.blocks, [{ height: 1 }]);
+});
+
+test("prefetch timing separates outstanding RPC wait from fetch duration", async () => {
+  let clock = 0;
+  let finish;
+  const sync = new BackgroundSyncService({
+    now: () => clock,
+    bitcoinRPC: { getBlocksWindow() { return new Promise(resolve => { finish = resolve; }); } },
+    dbService: {},
+    logger: { info() {}, error() {} },
+  });
+  sync.scheduleWindowPrefetch(1, 1);
+  clock = 20;
+  const loading = sync.loadBlocksWindow(1, 1);
+  clock = 40;
+  finish([{ height: 1 }]);
+  const loaded = await loading;
+  assert.equal(loaded.prefetchMs, 40);
+  assert.equal(loaded.prefetchWaitMs, 20);
+});
+
+test("sync status exposes the configured LevelDB table block size", () => {
+  const sync = new BackgroundSyncService({
+    bitcoinRPC: {},
+    dbService: { databaseOptions: { blockSize: 32768, cacheSize: 134217728 } },
+    logger: { info() {}, error() {} },
+  });
+  assert.equal(sync.getStatus().storage.levelDbBlockKb, 32);
+});
+
 test("stop waits for an active sync and closes the shared database", async () => {
   let finishSync;
   const active = new Promise((resolve) => {

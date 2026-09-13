@@ -218,6 +218,7 @@ test("sync records stage timings and write amplification per block", async () =>
     endBlock: 30,
     blocks: 1,
     prefetchMs: 10,
+    prefetchWaitMs: 10,
     commitMs: 30,
     totalMs: 60,
     blocksPerSecond: 16.667,

@@ -500,7 +500,10 @@ class BackgroundSyncService {
     if (startBlock > endBlock) return;
     const range = { startBlock, endBlock };
     const startedAt = this.now();
-    const promise = this.fetchBlocksWindow(startBlock, endBlock);
+    const promise = this.fetchBlocksWindow(startBlock, endBlock).then((blocks) => ({
+      blocks,
+      prefetchMs: this.now() - startedAt,
+    }));
     // A subsequent sync consumes and surfaces a prefetch failure. Attach a no-op
     // observer now so a failed speculative request never becomes unhandled.
     promise.catch(() => {});
@@ -515,13 +518,14 @@ class BackgroundSyncService {
       cached.range.endBlock === endBlock
     ) {
       this.prefetchedWindow = null;
-      return { blocks: await cached.promise, prefetchMs: this.now() - cached.startedAt };
+      const waitStartedAt = this.now();
+      const fetched = await cached.promise;
+      return { ...fetched, prefetchWaitMs: this.now() - waitStartedAt };
     }
     const startedAt = this.now();
-    return {
-      blocks: await this.fetchBlocksWindow(startBlock, endBlock),
-      prefetchMs: this.now() - startedAt,
-    };
+    const blocks = await this.fetchBlocksWindow(startBlock, endBlock);
+    const prefetchMs = this.now() - startedAt;
+    return { blocks, prefetchMs, prefetchWaitMs: prefetchMs };
   }
 
   async syncNewBlocks(startBlock, endBlock, scanDb) {
@@ -531,7 +535,7 @@ class BackgroundSyncService {
 
     try {
       const syncStartedAt = this.now();
-      const { blocks: prefetched, prefetchMs } = await this.loadBlocksWindow(
+      const { blocks: prefetched, prefetchMs, prefetchWaitMs } = await this.loadBlocksWindow(
         startBlock,
         endBlock
       );
@@ -540,6 +544,7 @@ class BackgroundSyncService {
         endBlock,
         blocks: prefetched.length,
         prefetchMs,
+        prefetchWaitMs,
         commitMs: 0,
         totalMs: 0,
         blocksPerSecond: 0,
@@ -1049,6 +1054,7 @@ class BackgroundSyncService {
         schemaVersion: SCHEMA_VERSION,
       },
       storage: {
+        levelDbBlockKb: (this.dbService.databaseOptions?.blockSize || 4096) / 1024,
         levelDbCacheMb:
           (this.dbService.databaseOptions?.cacheSize || 0) / (1024 * 1024),
       },
