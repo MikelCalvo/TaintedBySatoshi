@@ -334,6 +334,9 @@ const server = app.listen(PORT, () => {
   // Start background sync service in next tick to avoid blocking
   setImmediate(async () => {
     try {
+      // A completed durable wallet index stays readable during an RPC outage.
+      // This only restores its marker; partial backfills still wait for seeds.
+      await walletIndexService.restoreCompleted();
       logger.info("Starting background sync service...");
       await backgroundSyncService.start();
       await walletIndexService.ensureStarted();

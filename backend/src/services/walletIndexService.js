@@ -127,6 +127,21 @@ class WalletIndexService {
     void this.ensureStarted().catch(() => {});
   }
 
+  // Restore persisted read availability only. Missing/partial indexes still wait
+  // for normal seed initialization before ensureStarted may launch the backfill.
+  async restoreCompleted() {
+    if (this.isReady()) return true;
+    if (this.phase !== "idle") return false;
+    const db = await this.dbService.init();
+    const marker = await this.readMarker(db);
+    if (!isUsableCompleteMarker(marker)) return false;
+    await this.refreshTotal(db);
+    this.applyMarker(marker);
+    this.phase = "ready";
+    this.settleReady();
+    return true;
+  }
+
   ensureStarted() {
     if (this.ensurePromise) return this.ensurePromise;
     this.ensurePromise = this.begin().catch((error) => {

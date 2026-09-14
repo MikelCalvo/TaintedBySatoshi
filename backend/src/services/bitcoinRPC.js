@@ -210,7 +210,8 @@ Please check:
 ${error.message}
 `);
       }
-      process.exit(1);
+      // Let the caller report sync failure without killing read-only HTTP APIs.
+      throw error;
     }
   }
 
