@@ -77,3 +77,39 @@ test("GET /api/wallets passes a scoped prefix query through to listing", async (
   assert.equal(res.body.nextCursor, "bc1aaa");
   assert.deepEqual(res.body.params, { ...base, cursor });
 });
+
+test("GET /api/wallets maps WALLET_QUERY_TOO_BROAD to 422", async () => {
+  const handler = handleListWallets({
+    async listTaintedWallets() {
+      const error = new Error("Wallet query is too broad. Narrow the hop range or address prefix.");
+      error.code = "WALLET_QUERY_TOO_BROAD";
+      throw error;
+    },
+    logger: { error() {} },
+  });
+  const res = mockResponse();
+  await handler({ query: { sort: "hops-asc" } }, res);
+  assert.equal(res.statusCode, 422);
+  assert.equal(res.body.error, "WALLET_QUERY_TOO_BROAD");
+});
+
+test("GET /api/wallets keeps a v2 scan-boundary token raw for the service re-parse", async () => {
+  const listed = [];
+  const handler = handleListWallets({
+    async listTaintedWallets(params) {
+      listed.push(params);
+      return { wallets: [], nextCursor: params.cursor, hasMore: true, scanLimited: true };
+    },
+    logger: { error() {} },
+  });
+  const { parseWalletListQuery, encodeWalletCursor } = require("../src/utils/validation");
+  const base = parseWalletListQuery({ sort: "hops-asc", q: "bc1", limit: 20 });
+  const cursor = encodeWalletCursor(base, "h:0000000000000002:", { version: 2 });
+  const res = mockResponse();
+  await handler({ query: { sort: "hops-asc", q: "bc1", limit: "20", cursor } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.scanLimited, true);
+  assert.equal(res.body.nextCursor, cursor);
+  assert.equal(listed[0].cursor, cursor);
+  assert.equal(parseWalletListQuery({ sort: "hops-asc", q: "bc1", limit: "20", cursor }).cursor, "h:0000000000000002:");
+});

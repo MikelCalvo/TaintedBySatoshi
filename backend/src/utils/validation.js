@@ -70,6 +70,9 @@ function validateAndSanitizeAddress(address) {
 
 const MAX_ADDRESS_PREFIX_LENGTH = 90;
 const WALLET_QUERY_CHARSET = /^[0-9A-HJ-NP-Za-z]+$/;
+const HOP_RESULT_KEY = /^h:\d{16}:[0-9A-HJ-NP-Za-z]{1,90}$/;
+const HOP_BOUNDARY_KEY = /^h:\d{16}:$/;
+const ADDRESS_CURSOR_KEY = /^a:[0-9A-HJ-NP-Za-z]{1,90}$/;
 
 function invalidQuery(message = "Invalid query") {
   const error = new Error(message);
@@ -104,8 +107,20 @@ function walletQueryScope(query) {
   return [query.sort, query.q, query.minHops, query.maxHops];
 }
 
-function encodeWalletCursor(query, key) {
-  return Buffer.from(JSON.stringify({ v: 1, scope: walletQueryScope(query), key })).toString("base64url");
+function encodeWalletCursor(query, key, options = {}) {
+  const v = options.version ?? 1;
+  return Buffer.from(JSON.stringify({ v, scope: walletQueryScope(query), key })).toString("base64url");
+}
+
+function parseHopCursorKey(key, { version, q, minHops, maxHops }) {
+  const boundary = version === 2 && HOP_BOUNDARY_KEY.test(key);
+  if (!(boundary || HOP_RESULT_KEY.test(key))) throw invalidQuery("Invalid wallet cursor key");
+  const hops = Number(key.slice(2, 18));
+  if (!Number.isSafeInteger(hops) || hops < (minHops ?? 0) || hops > (maxHops ?? Number.MAX_SAFE_INTEGER)) {
+    throw invalidQuery("Invalid wallet cursor hops");
+  }
+  const address = key.slice(19);
+  if (address && q && !address.startsWith(q)) throw invalidQuery("Invalid wallet cursor prefix");
 }
 
 function parseWalletListQuery(query = {}) {
@@ -122,14 +137,16 @@ function parseWalletListQuery(query = {}) {
     if (typeof cursor !== "string" || !/^[A-Za-z0-9_-]{1,1024}$/.test(cursor)) throw invalidQuery("Invalid wallet cursor");
     let decoded;
     try { decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); } catch { throw invalidQuery("Invalid wallet cursor"); }
-    if (decoded?.v !== 1 || JSON.stringify(decoded.scope) !== JSON.stringify(walletQueryScope(normalized)) || typeof decoded.key !== "string") throw invalidQuery("Cursor does not match wallet filters");
+    if ((decoded?.v !== 1 && decoded?.v !== 2) || JSON.stringify(decoded.scope) !== JSON.stringify(walletQueryScope(normalized)) || typeof decoded.key !== "string") {
+      throw invalidQuery("Invalid cursor does not match wallet filters");
+    }
     const key = decoded.key;
-    const address = sort.startsWith("hops") ? key.slice(19) : key.slice(2);
-    if (sort.startsWith("hops") ? !/^h:\d{16}:[0-9A-HJ-NP-Za-z]{1,90}$/.test(key) : !/^a:[0-9A-HJ-NP-Za-z]{1,90}$/.test(key)) throw invalidQuery("Invalid wallet cursor key");
-    if (normalized.q && !address.startsWith(normalized.q)) throw invalidQuery("Invalid wallet cursor prefix");
     if (sort.startsWith("hops")) {
-      const hops = Number(key.slice(2,18));
-      if (!Number.isSafeInteger(hops) || hops < (normalized.minHops ?? 0) || hops > (normalized.maxHops ?? Number.MAX_SAFE_INTEGER)) throw invalidQuery("Invalid wallet cursor hops");
+      parseHopCursorKey(key, { version: decoded.v, q: normalized.q, minHops: normalized.minHops, maxHops: normalized.maxHops });
+    } else {
+      if (!ADDRESS_CURSOR_KEY.test(key)) throw invalidQuery("Invalid wallet cursor key");
+      const address = key.slice(2);
+      if (normalized.q && !address.startsWith(normalized.q)) throw invalidQuery("Invalid wallet cursor prefix");
     }
     normalized.cursor = key;
   }

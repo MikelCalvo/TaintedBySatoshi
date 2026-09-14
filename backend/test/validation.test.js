@@ -98,3 +98,35 @@ test("wallet list query clamps limit between 1 and 200", () => {
   assert.equal(parseWalletListQuery({ limit: "201" }).limit, 200);
   assert.equal(parseWalletListQuery({ limit: "abc" }).limit, 50);
 });
+
+test("v1 hop cursors stay compatible and v2 bucket boundaries stay in scope", () => {
+  const base = parseWalletListQuery({ sort: "hops-asc", q: "bc1", minHops: "2", maxHops: "9" });
+  const v1Key = "h:0000000000000002:bc1aaa";
+  const v1 = encodeWalletCursor(base, v1Key);
+  assert.deepEqual(parseWalletListQuery({ ...base, cursor: v1 }), { ...base, cursor: v1Key });
+
+  const boundaryKey = "h:0000000000000002:";
+  const v2 = encodeWalletCursor(base, boundaryKey, { version: 2 });
+  assert.deepEqual(parseWalletListQuery({ sort: "hops-asc", q: "bc1", minHops: "2", maxHops: "9", cursor: v2 }), {
+    ...base,
+    cursor: boundaryKey,
+  });
+
+  assertInvalidWalletQuery({ sort: "hops-asc", q: "bc1", minHops: "2", maxHops: "9", cursor: encodeWalletCursor(base, boundaryKey) });
+  assertInvalidWalletQuery({ sort: "hops-desc", q: "bc1", minHops: "2", maxHops: "9", cursor: v2 });
+  assertInvalidWalletQuery({ sort: "hops-asc", q: "zz", minHops: "2", maxHops: "9", cursor: v2 });
+  assertInvalidWalletQuery({
+    sort: "hops-asc",
+    q: "bc1",
+    minHops: "3",
+    maxHops: "9",
+    cursor: encodeWalletCursor({ ...base, minHops: 3 }, boundaryKey, { version: 2 }),
+  });
+  assertInvalidWalletQuery({
+    sort: "hops-asc",
+    q: "bc1",
+    minHops: "2",
+    maxHops: "9",
+    cursor: encodeWalletCursor(base, "h:0000000000000002:zzzz", { version: 2 }),
+  });
+});

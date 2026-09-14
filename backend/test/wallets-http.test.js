@@ -84,10 +84,16 @@ test.describe("GET /api/wallets HTTP contract", { concurrency: 1 }, () => {
     dbService.logger = silentLogger;
     const db = await dbService.init();
 
-    records = fixtureRecords().concat([
-      { address: "bc1qmatch1", d: 3 },
-      { address: "BC1HIDDEN", d: 3 },
-    ]);
+    records = fixtureRecords().concat(
+      [
+        { address: "bc1qmatch1", d: 3 },
+        { address: "BC1HIDDEN", d: 3 },
+      ],
+      Array.from({ length: 520 }, (_, i) => ({
+        address: `3wide${String(i).padStart(4, "0")}`,
+        d: i,
+      }))
+    );
     await db.batch(records.flatMap((record) => [
       {
         type: "put",
@@ -123,6 +129,20 @@ test.describe("GET /api/wallets HTTP contract", { concurrency: 1 }, () => {
       await dbService.close();
       dbService.dbPath = original.dbPath;
       if (tempDir) await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("hops-asc over more than 512 occupied degrees returns 200 not 422", async () => {
+    const page = await requestWallets(baseUrl, { sort: "hops-asc", limit: "20" });
+    assert.equal(page.status, 200);
+    assert.equal(page.body.error, undefined);
+    assert.equal(page.body.wallets.length, 20);
+    assert.equal(page.body.hasMore, true);
+    assert.equal(typeof page.body.nextCursor, "string");
+    assert.notEqual(page.body.scanLimited, true);
+    assert.equal(page.body.wallets[0].hops, 0);
+    for (let i = 1; i < page.body.wallets.length; i += 1) {
+      assert.ok(page.body.wallets[i].hops >= page.body.wallets[i - 1].hops);
     }
   });
 
@@ -311,5 +331,20 @@ test.describe("GET /api/wallets HTTP contract", { concurrency: 1 }, () => {
     });
     assert.equal(updated.status, 200);
     assert.ok(updated.body.wallets.some((wallet) => wallet.address === target.address && wallet.hops === nextHops));
+  });
+
+  test("v2 hop-boundary cursor is accepted over HTTP and continues after that degree", async () => {
+    const { encodeWalletCursor } = require("../src/utils/validation");
+    const query = { sort: "hops-asc", q: "1", minHops: "0", maxHops: "10", limit: "5" };
+    const parsed = parseWalletListQuery(query);
+    const lastAtDegreeZero = records.filter((record) => record.d === 0).sort((a, b) => a.address.localeCompare(b.address)).at(-1);
+    const page = await requestWallets(baseUrl, {
+      ...query,
+      cursor: encodeWalletCursor(parsed, `h:${String(lastAtDegreeZero.d).padStart(16, "0")}:`, { version: 2 }),
+    });
+    assert.equal(page.status, 200);
+    assert.ok(page.body.wallets.length > 0);
+    assert.ok(page.body.wallets.every((wallet) => wallet.hops >= 1));
+    assert.ok(page.body.wallets.every((wallet) => wallet.address.startsWith("1")));
   });
 });
